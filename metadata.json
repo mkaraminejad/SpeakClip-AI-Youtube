@@ -1,0 +1,6 @@
+{
+  "name": "SpeakClip AI",
+  "description": "Transform short English speeches and interviews into educational YouTube clips with Persian explanations, idioms breakdown, quizzes, and subtitle exports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

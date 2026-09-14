@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-persian: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-english: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-english);
+  }
+
+  [dir="rtl"] {
+    font-family: var(--font-persian);
+  }
+}
+
+.font-persian {
+  font-family: var(--font-persian);
+}
+
+.font-english {
+  font-family: var(--font-english);
+}
+
+/* Custom sleek scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.8);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 1);
+}
+

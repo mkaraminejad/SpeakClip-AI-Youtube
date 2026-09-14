@@ -1,0 +1,155 @@
+import { GoogleGenAI, Type } from '@google/genai';
+import { AIModelConfig, AIProviderType } from '../src/types';
+
+export interface AIExecutionOptions {
+  config?: AIModelConfig;
+  systemPrompt: string;
+  userPrompt: string;
+  geminiSchema?: any;
+}
+
+export function getDefaultAIConfig(): AIModelConfig {
+  const provider = (process.env.AI_PROVIDER as AIProviderType) || 'gemini';
+  const modelName = process.env.AI_MODEL || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+  const baseUrl = process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+  return {
+    provider,
+    modelName,
+    baseUrl,
+  };
+}
+
+// Unified runner supporting Gemini, OpenAI, Claude, and Local LLMs (Ollama / LM Studio / vLLM)
+export async function runAICompletion(options: AIExecutionOptions): Promise<string> {
+  const aiConfig = options.config || getDefaultAIConfig();
+  const provider = aiConfig.provider || 'gemini';
+  const modelName = aiConfig.modelName || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+
+  // 1. Google Gemini Provider
+  if (provider === 'gemini') {
+    const apiKey = aiConfig.apiKey || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY environment variable is not configured');
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
+    const geminiParams: any = {
+      model: modelName,
+      contents: options.userPrompt,
+      config: {
+        systemInstruction: options.systemPrompt,
+        responseMimeType: 'application/json',
+      },
+    };
+
+    if (options.geminiSchema) {
+      geminiParams.config.responseSchema = options.geminiSchema;
+    }
+
+    const response = await ai.models.generateContent(geminiParams);
+    return response.text || '';
+  }
+
+  // 2. Local LLM (Ollama, LM Studio, vLLM) or Custom OpenAI-compatible endpoint
+  if (provider === 'local_ollama' || provider === 'custom_compatible' || provider === 'openai') {
+    const defaultBaseUrl =
+      provider === 'openai'
+        ? 'https://api.openai.com/v1'
+        : process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+
+    const baseUrl = (aiConfig.baseUrl || defaultBaseUrl).replace(/\/$/, '');
+    const apiKey = aiConfig.apiKey || (provider === 'openai' ? process.env.OPENAI_API_KEY : 'sk-local');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const systemWithJsonInstruction = `${options.systemPrompt}\n\nIMPORTANT: You must output ONLY a valid raw JSON object or array matching the requested schema. Do not enclose in markdown code blocks or add introductory text.`;
+
+    const requestBody: any = {
+      model: modelName,
+      messages: [
+        { role: 'system', content: systemWithJsonInstruction },
+        { role: 'user', content: options.userPrompt },
+      ],
+      temperature: aiConfig.temperature ?? 0.2,
+      response_format: { type: 'json_object' },
+    };
+
+    const endpoint = `${baseUrl}/chat/completions`;
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`LLM provider (${provider}) request failed [${res.status}]: ${errText}`);
+    }
+
+    const data = (await res.json()) as any;
+    const content = data.choices?.[0]?.message?.content || '';
+    return cleanJsonString(content);
+  }
+
+  // 3. Anthropic Claude Provider
+  if (provider === 'anthropic') {
+    const apiKey = aiConfig.apiKey || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('ANTHROPIC_API_KEY environment variable is not configured');
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+
+    const systemWithJson = `${options.systemPrompt}\n\nOutput only valid JSON. No conversational preamble.`;
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelName || 'claude-3-5-sonnet-20241022',
+        max_tokens: 4096,
+        system: systemWithJson,
+        messages: [{ role: 'user', content: options.userPrompt }],
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Anthropic API request failed [${res.status}]: ${errText}`);
+    }
+
+    const data = (await res.json()) as any;
+    const textContent = data.content?.[0]?.text || '';
+    return cleanJsonString(textContent);
+  }
+
+  throw new Error(`Unsupported AI provider: ${provider}`);
+}
+
+// Strips markdown fence blocks if a model returns ```json ... ```
+export function cleanJsonString(raw: string): string {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
+  }
+  return cleaned.trim();
+}
