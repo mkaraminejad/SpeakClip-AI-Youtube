@@ -273,7 +273,7 @@ ${project.lessonItems
             onClick={() =>
               triggerDownload(
                 'RIFF....WEBM', // Binary mockup
-                `${project.title.toLowerCase().replace(/\s+/g, '_')}_1080p.webm`,
+                `${(project?.title || 'english_lesson').toLowerCase().replace(/[^a-z0-9]+/g, '_')}_1080p.webm`,
                 'video/webm'
               )
             }
@@ -299,7 +299,7 @@ ${project.lessonItems
             onClick={() =>
               triggerDownload(
                 generateEnglishSRT(),
-                `${project.title.toLowerCase().replace(/\s+/g, '_')}_en.srt`,
+                `${(project?.title || 'english_lesson').toLowerCase().replace(/[^a-z0-9]+/g, '_')}_en.srt`,
                 'text/plain'
               )
             }
@@ -325,7 +325,7 @@ ${project.lessonItems
             onClick={() =>
               triggerDownload(
                 generatePersianSRT(),
-                `${project.title.toLowerCase().replace(/\s+/g, '_')}_fa.srt`,
+                `${(project?.title || 'english_lesson').toLowerCase().replace(/[^a-z0-9]+/g, '_')}_fa.srt`,
                 'text/plain'
               )
             }
@@ -352,7 +352,7 @@ ${project.lessonItems
               onClick={() =>
                 triggerDownload(
                   generateMarkdownNotes(),
-                  `${project.title.toLowerCase().replace(/\s+/g, '_')}_notes.md`,
+                  `${(project?.title || 'english_lesson').toLowerCase().replace(/[^a-z0-9]+/g, '_')}_notes.md`,
                   'text/markdown'
                 )
               }
@@ -365,7 +365,7 @@ ${project.lessonItems
               onClick={() =>
                 triggerDownload(
                   generateVocabCSV(),
-                  `${project.title.toLowerCase().replace(/\s+/g, '_')}_vocab.csv`,
+                  `${(project?.title || 'english_lesson').toLowerCase().replace(/[^a-z0-9]+/g, '_')}_vocab.csv`,
                   'text/csv'
                 )
               }

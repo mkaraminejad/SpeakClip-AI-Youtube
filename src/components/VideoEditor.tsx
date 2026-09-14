@@ -108,6 +108,11 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
     return () => cancelAnimationFrame(animFrame);
   }, [isPlaying, activeSceneIndex, currentScene, aspectRatio, subtitleStyle, sceneProgress]);
 
+  // Helper to normalize scene type across snake_case and camelCase
+  const getSceneType = (s?: SceneDefinition): string => {
+    return s?.sceneType || s?.scene_type || 'original_clip';
+  };
+
   // Main Canvas drawing logic
   const drawCanvas = () => {
     const canvas = canvasRef.current;
@@ -127,8 +132,10 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
       return;
     }
 
+    const sceneType = getSceneType(currentScene);
+
     // 1. Draw Scene Background based on type
-    if (currentScene.sceneType === 'branded_intro') {
+    if (sceneType === 'branded_intro') {
       const grad = ctx.createLinearGradient(0, 0, width, height);
       grad.addColorStop(0, '#0f172a');
       grad.addColorStop(1, '#0369a1');
@@ -149,7 +156,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
       ctx.fillStyle = '#facc15';
       const barWidth = 240 * sceneProgress;
       ctx.fillRect(width / 2 - 120, height / 2 + 50, barWidth, 6);
-    } else if (currentScene.sceneType === 'pause_and_teach') {
+    } else if (sceneType === 'pause_and_teach') {
       // Blurred navy backdrop
       const grad = ctx.createLinearGradient(0, 0, width, height);
       grad.addColorStop(0, '#020617');
@@ -197,7 +204,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
         ctx.textAlign = 'left';
         wrapText(ctx, `Context: "${currentScene.englishSub}"`, cardMargin + 30, cardMargin + 250, cardW - 60, 28);
       }
-    } else if (currentScene.sceneType === 'quiz') {
+    } else if (sceneType === 'quiz' || sceneType === 'mini_quiz') {
       // Quiz Studio Canvas
       const grad = ctx.createLinearGradient(0, 0, width, height);
       grad.addColorStop(0, '#090d16');
@@ -235,7 +242,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
         ctx.font = 'bold 24px Vazirmatn, sans-serif';
         ctx.fillText(`✓ ${currentScene.persianSub || 'پاسخ صحیح'}`, width / 2, height - 90);
       }
-    } else if (currentScene.sceneType === 'outro') {
+    } else if (sceneType === 'outro' || sceneType === 'summary_outro') {
       // Outro screen
       const grad = ctx.createLinearGradient(0, 0, width, height);
       grad.addColorStop(0, '#0369a1');
@@ -273,7 +280,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 16px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(currentScene.sceneType === 'replay' ? 'REPLAY WITH SUBTITLES' : 'ORIGINAL SPEECH', width / 2, height / 2 + 40);
+      ctx.fillText(sceneType === 'replay' || sceneType === 'replay_with_subtitles' ? 'REPLAY WITH SUBTITLES' : 'ORIGINAL SPEECH', width / 2, height / 2 + 40);
 
       // Subtitle Box at Bottom
       const boxW = width - 80;
@@ -482,7 +489,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
               <div className="flex-1 max-w-md mx-2">
                 <div className="flex justify-between text-[11px] text-slate-400 mb-1">
                   <span className="font-semibold text-slate-200">
-                    {currentScene?.title || currentScene?.sceneType}
+                    {currentScene?.title || getSceneType(currentScene).replace(/_/g, ' ')}
                   </span>
                   <span>{Math.round(sceneProgress * 100)}%</span>
                 </div>
@@ -516,6 +523,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
               {scenes.map((scene, idx) => {
                 const isActive = activeSceneIndex === idx;
+                const typeLabel = getSceneType(scene).replace(/_/g, ' ');
                 return (
                   <button
                     key={scene.id}
@@ -532,8 +540,8 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
                     <span className="text-[10px] font-mono text-cyan-400 block mb-1">
                       0{idx + 1} • {scene.duration}s
                     </span>
-                    <span className="text-xs font-bold text-slate-200 block truncate">
-                      {scene.sceneType.replace(/_/g, ' ')}
+                    <span className="text-xs font-bold text-slate-200 block truncate capitalize">
+                      {typeLabel}
                     </span>
                     <span className="text-[10px] text-slate-500 block truncate mt-0.5">
                       {scene.title || scene.highlightPhrase || 'Clip'}

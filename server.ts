@@ -1127,12 +1127,12 @@ app.get('/api/projects/:id/export', (req, res) => {
       ...item.key_vocabulary,
     ];
     allExp.forEach((exp) => {
-      const safeTerm = `"${exp.term.replace(/"/g, '""')}"`;
-      const safeType = `"${exp.type}"`;
-      const safeMeaning = `"${exp.meaning_in_context.replace(/"/g, '""')}"`;
-      const safeFa = `"${exp.persian_equivalent.replace(/"/g, '""')}"`;
-      const safeFormality = `"${exp.formality}"`;
-      const safeEx = `"${exp.natural_example.replace(/"/g, '""')}"`;
+      const safeTerm = `"${(exp.term || '').replace(/"/g, '""')}"`;
+      const safeType = `"${exp.type || ''}"`;
+      const safeMeaning = `"${(exp.meaning_in_context || '').replace(/"/g, '""')}"`;
+      const safeFa = `"${(exp.persian_equivalent || '').replace(/"/g, '""')}"`;
+      const safeFormality = `"${exp.formality || ''}"`;
+      const safeEx = `"${(exp.natural_example || '').replace(/"/g, '""')}"`;
       csvVocab += `${safeTerm},${safeType},${safeMeaning},${safeFa},${safeFormality},${safeEx}\n`;
     });
   });

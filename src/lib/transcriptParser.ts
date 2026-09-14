@@ -4,7 +4,7 @@ import { TranscriptSegment } from '../types';
  * Parses time string formatted as HH:MM:SS,mmm or HH:MM:SS.mmm or MM:SS to seconds
  */
 export function parseTimestampToSeconds(timeStr: string): number {
-  if (!timeStr) return 0;
+  if (!timeStr || typeof timeStr !== 'string') return 0;
   const clean = timeStr.trim().replace(',', '.');
   const parts = clean.split(':');
 
@@ -25,6 +25,7 @@ export function parseTimestampToSeconds(timeStr: string): number {
  * Parses SRT formatted subtitle text into TranscriptSegment array
  */
 export function parseSrt(srtContent: string): TranscriptSegment[] {
+  if (!srtContent || typeof srtContent !== 'string') return [];
   const normalized = srtContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   const blocks = normalized.split(/\n\s*\n/);
   const segments: TranscriptSegment[] = [];
@@ -85,6 +86,7 @@ export function parseSrt(srtContent: string): TranscriptSegment[] {
  * Parses WebVTT formatted subtitle text into TranscriptSegment array
  */
 export function parseVtt(vttContent: string): TranscriptSegment[] {
+  if (!vttContent || typeof vttContent !== 'string') return [];
   // Strip WEBVTT header
   const cleaned = vttContent
     .replace(/^WEBVTT[^\n]*\n+/i, '')
@@ -101,7 +103,7 @@ export function parsePlainTextToSegments(
   text: string,
   estimatedDuration: number = 120
 ): TranscriptSegment[] {
-  if (!text || !text.trim()) return [];
+  if (!text || typeof text !== 'string' || !text.trim()) return [];
 
   // Match sentences ending in period, exclamation, or question mark, or newlines
   const rawSentences = text

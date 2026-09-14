@@ -149,9 +149,10 @@ export function generateDynamicLessonItemsFromSegments(
   const targetSegments = selected.length > 0 ? selected : segments;
 
   targetSegments.forEach((seg, idx) => {
-    const words = seg.text.replace(/[^a-zA-Z\s]/g, '').split(/\s+/).filter((w) => w.length > 3);
+    const rawText = seg.text || '';
+    const words = rawText.replace(/[^a-zA-Z\s]/g, '').split(/\s+/).filter((w) => w.length > 3);
     const keyWord = words.length > 2 ? words[Math.floor(words.length / 2)] : (words[0] || 'expression');
-    const lowerText = seg.text.toLowerCase();
+    const lowerText = rawText.toLowerCase();
 
     // Detect potential idioms / collocations
     let detectedPhrase = keyWord;
