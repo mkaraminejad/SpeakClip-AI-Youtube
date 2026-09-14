@@ -213,6 +213,18 @@ app.get('/api/ai/config', (req, res) => {
         isConfigured: !!process.env.GEMINI_API_KEY,
       },
       {
+        id: 'groq',
+        name: 'Groq Cloud (Ultra-Fast LPU)',
+        description: 'Sub-second inference at ~500 tokens/sec via LPU hardware',
+        defaultBaseUrl: 'https://api.groq.com/openai/v1',
+        models: [
+          { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile (Recommended)' },
+          { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant (Ultra-fast)' },
+          { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B (MoE 32k context)' },
+        ],
+        isConfigured: !!process.env.GROQ_API_KEY,
+      },
+      {
         id: 'openai',
         name: 'OpenAI',
         description: 'Industry-standard GPT models with structured outputs',

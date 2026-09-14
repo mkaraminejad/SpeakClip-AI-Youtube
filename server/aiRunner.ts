@@ -10,8 +10,18 @@ export interface AIExecutionOptions {
 
 export function getDefaultAIConfig(): AIModelConfig {
   const provider = (process.env.AI_PROVIDER as AIProviderType) || 'gemini';
-  const modelName = process.env.AI_MODEL || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
-  const baseUrl = process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+  let defaultModel = 'gemini-2.5-flash';
+  if (provider === 'groq') defaultModel = 'llama-3.3-70b-versatile';
+  else if (provider === 'openai') defaultModel = 'gpt-4o';
+  else if (provider === 'anthropic') defaultModel = 'claude-3-5-sonnet-20241022';
+  else if (provider === 'local_ollama') defaultModel = 'llama3.2';
+
+  const modelName = process.env.AI_MODEL || defaultModel;
+  const baseUrl =
+    provider === 'groq'
+      ? 'https://api.groq.com/openai/v1'
+      : process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+
   return {
     provider,
     modelName,
@@ -19,11 +29,17 @@ export function getDefaultAIConfig(): AIModelConfig {
   };
 }
 
-// Unified runner supporting Gemini, OpenAI, Claude, and Local LLMs (Ollama / LM Studio / vLLM)
+// Unified runner supporting Gemini, Groq, OpenAI, Claude, and Local LLMs (Ollama / LM Studio / vLLM)
 export async function runAICompletion(options: AIExecutionOptions): Promise<string> {
   const aiConfig = options.config || getDefaultAIConfig();
   const provider = aiConfig.provider || 'gemini';
-  const modelName = aiConfig.modelName || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+  const modelName =
+    aiConfig.modelName ||
+    (provider === 'gemini'
+      ? 'gemini-2.5-flash'
+      : provider === 'groq'
+      ? 'llama-3.3-70b-versatile'
+      : 'llama3.2');
 
   // 1. Google Gemini Provider
   if (provider === 'gemini') {
@@ -58,15 +74,34 @@ export async function runAICompletion(options: AIExecutionOptions): Promise<stri
     return response.text || '';
   }
 
-  // 2. Local LLM (Ollama, LM Studio, vLLM) or Custom OpenAI-compatible endpoint
-  if (provider === 'local_ollama' || provider === 'custom_compatible' || provider === 'openai') {
-    const defaultBaseUrl =
-      provider === 'openai'
-        ? 'https://api.openai.com/v1'
-        : process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+  // 2. Groq, Local LLM (Ollama, LM Studio, vLLM), OpenAI, or Custom OpenAI-compatible endpoint
+  if (
+    provider === 'groq' ||
+    provider === 'local_ollama' ||
+    provider === 'custom_compatible' ||
+    provider === 'openai'
+  ) {
+    let defaultBaseUrl = 'http://localhost:11434/v1';
+    let defaultApiKey = 'sk-local';
+
+    if (provider === 'groq') {
+      defaultBaseUrl = 'https://api.groq.com/openai/v1';
+      defaultApiKey = process.env.GROQ_API_KEY || '';
+    } else if (provider === 'openai') {
+      defaultBaseUrl = 'https://api.openai.com/v1';
+      defaultApiKey = process.env.OPENAI_API_KEY || '';
+    } else if (provider === 'local_ollama') {
+      defaultBaseUrl = process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1';
+    }
 
     const baseUrl = (aiConfig.baseUrl || defaultBaseUrl).replace(/\/$/, '');
-    const apiKey = aiConfig.apiKey || (provider === 'openai' ? process.env.OPENAI_API_KEY : 'sk-local');
+    const apiKey = aiConfig.apiKey || defaultApiKey;
+
+    if ((provider === 'groq' || provider === 'openai') && !apiKey) {
+      throw new Error(
+        `${provider === 'groq' ? 'GROQ_API_KEY' : 'OPENAI_API_KEY'} is required. Please set it in Settings or enter it in the AI Model dialog.`
+      );
+    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

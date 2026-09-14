@@ -58,6 +58,25 @@ const PROVIDER_OPTIONS: {
     defaultModel: 'gemini-2.5-flash',
   },
   {
+    id: 'groq',
+    nameEn: 'Groq Cloud (Ultra-Fast LPU)',
+    nameFa: 'گروک (Groq Cloud)',
+    descriptionEn: 'Lightning-fast LPU inference (~500 tokens/sec) for instant transcription breakdowns.',
+    descriptionFa: 'سرعت خارق‌العاده سخت‌افزار LPU (~۵۰۰ توکن در ثانیه) برای استخراج و ترجمه آنی.',
+    icon: Zap,
+    badgeEn: 'LPU • Sub-Second',
+    badgeFa: 'فوق‌سریع • LPU',
+    defaultBaseUrl: 'https://api.groq.com/openai/v1',
+    requiresKey: true,
+    models: [
+      { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', tag: 'Top Intelligence & Speed' },
+      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant', tag: 'Blazing Fast (~800 t/s)' },
+      { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B (MoE)', tag: 'Rich Context' },
+      { id: 'gemma2-9b-it', name: 'Gemma 2 9B (Google)', tag: 'Concise' },
+    ],
+    defaultModel: 'llama-3.3-70b-versatile',
+  },
+  {
     id: 'local_ollama',
     nameEn: 'Local LLM (Ollama / LM Studio)',
     nameFa: 'مدل محلی (Ollama / LM Studio)',
@@ -427,9 +446,22 @@ export function AIModelSettingsModal({
             {/* Optional API Key for third-party providers */}
             {currentProviderDef.requiresKey && (
               <div className="pt-2 border-t border-slate-850 space-y-1">
-                <label className="block text-xs font-semibold text-slate-300">
-                  {t.apiKeyOptional}
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    {selectedProvider === 'groq' ? 'Groq API Key (gsk_...)' : t.apiKeyOptional}
+                  </label>
+                  {selectedProvider === 'groq' && (
+                    <a
+                      href="https://console.groq.com/keys"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 underline underline-offset-2"
+                    >
+                      <span>{locale === 'fa' ? 'دریافت کلید رایگان از Groq' : 'Get free key on console.groq.com'}</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
                 <input
                   type="password"
                   value={customApiKey}
@@ -437,9 +469,16 @@ export function AIModelSettingsModal({
                     setCustomApiKey(e.target.value);
                     setTestResult(null);
                   }}
-                  placeholder="sk-..."
+                  placeholder={selectedProvider === 'groq' ? 'gsk_...' : 'sk-...'}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
                 />
+                {selectedProvider === 'groq' && (
+                  <p className="text-[11px] text-slate-400">
+                    {locale === 'fa'
+                      ? 'سرعت پردازشگر LPU گروک بسیار بالا بوده و پلن رایگان با سرعت چندصد توکن در ثانیه ارائه می‌شود.'
+                      : 'Groq LPUs process hundreds of tokens/sec with generous free rate limits.'}
+                  </p>
+                )}
               </div>
             )}
           </div>

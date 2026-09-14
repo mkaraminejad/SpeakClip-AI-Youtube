@@ -107,6 +107,17 @@ When running SpeakClip AI inside Docker and Ollama on your host machine:
      ```
    - In the SpeakClip AI UI, open the **AI Model Settings** modal (from the header bar), select **Local LLM (Ollama)**, set the Base URL to `http://host.docker.internal:11434/v1`, and click **Test Connection**.
 
+### ⚡ Using Groq Cloud (Ultra-Fast LPU Inference)
+
+SpeakClip AI natively supports **[Groq Cloud](https://groq.com)** to achieve blazing fast (~500-800 tokens/sec) transcription segmentation, Persian idiom extraction, and quiz generation using Meta Llama 3.3 and Mixtral models.
+
+1. **Obtain a free Groq API Key:**
+   - Sign in at **[console.groq.com/keys](https://console.groq.com/keys)** and generate an API key (starts with `gsk_...`).
+
+2. **Configure Groq in SpeakClip AI:**
+   - **Via the UI:** Open the **AI Model Settings** modal from the header bar, select **Groq Cloud**, enter your `gsk_...` key, choose a model (such as `llama-3.3-70b-versatile`), and click **Test Connection**.
+   - **Via Environment Variable:** Add `GROQ_API_KEY=gsk_...` to your `.env` or Docker environment, or set `AI_PROVIDER=groq` and `AI_MODEL=llama-3.3-70b-versatile`.
+
 ---
 
 ## 🛠️ Local Development (Without Docker)
@@ -141,6 +152,7 @@ Refer to `.env.example` for all configurable variables:
 | `PORT` | Web server listening port | `3000` |
 | `NODE_ENV` | Runtime environment (`development` or `production`) | `production` |
 | `GEMINI_API_KEY` | Google Gemini API key (recommended) | None |
+| `GROQ_API_KEY` | Groq Cloud API key for Llama 3.3 / LPU inference | None |
 | `OPENAI_API_KEY` | OpenAI API key for GPT-4o / GPT-4o Mini | None |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude 3.5 Sonnet | None |
 | `LOCAL_LLM_BASE_URL` | Base URL for private Ollama / LM Studio / vLLM | `http://localhost:11434/v1` |

@@ -152,6 +152,7 @@ export interface SceneDefinition {
 
 export type AIProviderType =
   | 'gemini'
+  | 'groq'
   | 'openai'
   | 'anthropic'
   | 'local_ollama'

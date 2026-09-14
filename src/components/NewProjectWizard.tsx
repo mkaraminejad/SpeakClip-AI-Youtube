@@ -349,7 +349,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <button
                   type="button"
                   onClick={() => {
@@ -372,20 +372,39 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setAiProvider('local_ollama');
-                    setAiModel('llama3.2');
+                    setAiProvider('groq');
+                    setAiModel('llama-3.3-70b-versatile');
                   }}
                   className={`p-2.5 rounded-lg border text-left transition-all ${
-                    aiProvider === 'local_ollama'
+                    aiProvider === 'groq'
                       ? 'border-amber-500 bg-amber-950/30 text-amber-200 ring-1 ring-amber-500'
                       : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
                   }`}
                 >
                   <div className="flex items-center gap-1.5 font-bold text-xs">
-                    <Cpu className="w-3.5 h-3.5 text-amber-400" />
+                    <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Groq</span>
+                  </div>
+                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">Llama 3.3 (LPU)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAiProvider('local_ollama');
+                    setAiModel('llama3.2');
+                  }}
+                  className={`p-2.5 rounded-lg border text-left transition-all ${
+                    aiProvider === 'local_ollama'
+                      ? 'border-cyan-500 bg-cyan-950/30 text-cyan-200 ring-1 ring-cyan-500'
+                      : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 font-bold text-xs">
+                    <Cpu className="w-3.5 h-3.5 text-cyan-400" />
                     <span>Local LLM</span>
                   </div>
-                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">Ollama (100% Private)</span>
+                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">Ollama (Offline)</span>
                 </button>
 
                 <button
