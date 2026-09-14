@@ -11,9 +11,14 @@ import {
   AlertTriangle,
   Cpu,
   Zap,
+  FileText,
+  Subtitles,
+  RefreshCw,
+  Check,
 } from 'lucide-react';
-import { LearnerLevel, VideoFormat, TeachingTone, Project, AIProviderType, AIModelConfig } from '../types';
+import { LearnerLevel, VideoFormat, TeachingTone, Project, AIProviderType, AIModelConfig, TranscriptSegment } from '../types';
 import { Locale, translations } from '../lib/i18n';
+import { parseAnyTranscriptInput, parseSrt, parseVtt } from '../lib/transcriptParser';
 
 interface NewProjectWizardProps {
   locale: Locale;
@@ -31,7 +36,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
 
   // Form State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [selectedPresetKey, setSelectedPresetKey] = useState<'fear_talk' | 'steve_jobs' | 'custom'>('fear_talk');
+  const [selectedPresetKey, setSelectedPresetKey] = useState<'fear_talk' | 'steve_jobs' | 'simon_sinek' | 'custom'>('fear_talk');
   const [projectTitle, setProjectTitle] = useState('Mastering Spoken English: Overcoming Fear & Taking Action');
   const [learnerLevel, setLearnerLevel] = useState<LearnerLevel>('B2');
   const [outputFormat, setOutputFormat] = useState<VideoFormat>('16:9');
@@ -44,23 +49,97 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Custom Transcript & Subtitles State
+  const [customTranscriptText, setCustomTranscriptText] = useState('');
+  const [customSegments, setCustomSegments] = useState<TranscriptSegment[]>([]);
+  const [isGeneratingCustomSpeech, setIsGeneratingCustomSpeech] = useState(false);
+  const [transcriptTab, setTranscriptTab] = useState<'ai' | 'paste' | 'upload'>('ai');
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setSelectedFile(file);
       setSelectedPresetKey('custom');
-      setProjectTitle(file.name.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' '));
+      const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
+      setProjectTitle(cleanTitle);
+      setCustomSegments([]);
+      setCustomTranscriptText('');
     }
   };
 
-  const handlePresetSelect = (key: 'fear_talk' | 'steve_jobs') => {
+  const handlePresetSelect = (key: 'fear_talk' | 'steve_jobs' | 'simon_sinek') => {
     setSelectedPresetKey(key);
     setSelectedFile(null);
+    setCustomSegments([]);
+    setCustomTranscriptText('');
     if (key === 'fear_talk') {
       setProjectTitle('Mastering Spoken English: Overcoming Fear & Taking Action');
-    } else {
+    } else if (key === 'steve_jobs') {
       setProjectTitle('Steve Jobs: Connecting the Dots & Finding Your Purpose');
+    } else {
+      setProjectTitle('Simon Sinek: How Great Leaders Inspire Action (Start with Why)');
     }
+  };
+
+  const handleGenerateCustomSpeech = async () => {
+    if (!projectTitle.trim()) {
+      setErrorMsg('Please enter a project title first.');
+      return;
+    }
+    setIsGeneratingCustomSpeech(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/generate-transcript', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: projectTitle,
+          duration: selectedFile ? 180 : 120,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to generate transcript');
+      if (Array.isArray(data.segments) && data.segments.length > 0) {
+        setCustomSegments(data.segments);
+        setCustomTranscriptText(data.fullText || data.segments.map((s: any) => s.text).join(' '));
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error generating speech text');
+    } finally {
+      setIsGeneratingCustomSpeech(false);
+    }
+  };
+
+  const handleCustomSubtitleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (!text) return;
+
+      let parsed: TranscriptSegment[] = [];
+      if (file.name.endsWith('.vtt')) {
+        parsed = parseVtt(text);
+      } else {
+        parsed = parseSrt(text);
+      }
+
+      if (parsed.length === 0) {
+        parsed = parseAnyTranscriptInput(text, selectedFile ? 180 : 120);
+      }
+
+      setCustomSegments(parsed);
+      setCustomTranscriptText(text);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleParseCustomText = () => {
+    if (!customTranscriptText.trim()) return;
+    const parsed = parseAnyTranscriptInput(customTranscriptText, selectedFile ? 180 : 120);
+    setCustomSegments(parsed);
   };
 
   const handleSubmit = async () => {
@@ -89,9 +168,11 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
           numSegments,
           tone,
           legalConfirmed,
-          mediaFileName: selectedFile ? selectedFile.name : 'tim_ferriss_fear_speech.mp4',
+          mediaFileName: selectedFile ? selectedFile.name : 'speech_source_video.mp4',
           mediaDuration: selectedFile ? 180 : 184,
           sampleKey: selectedPresetKey,
+          customTranscript: customTranscriptText || undefined,
+          transcriptSegments: customSegments.length > 0 ? customSegments : undefined,
           aiModelConfig: {
             provider: aiProvider,
             modelName: aiModel,
@@ -165,7 +246,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
             {/* Presets Grid */}
             <div className="space-y-2">
               <span className="text-xs font-medium text-slate-400">{t.choosePresetSample}</span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <button
                   type="button"
                   onClick={() => handlePresetSelect('fear_talk')}
@@ -178,13 +259,13 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
                     <span className="font-semibold text-xs text-slate-200">
-                      {locale === 'fa' ? 'سخنرانی غلبه بر ترس (تیم فریس)' : 'Tim Ferriss Fear-Setting Excerpt'}
+                      {locale === 'fa' ? 'سخنرانی غلبه بر ترس (تیم فریس)' : 'Tim Ferriss Fear-Setting'}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1">
                     {locale === 'fa'
-                      ? 'شامل ۵ اصطلاح کلیدی: bite the bullet, put off, paralyzing fear, profound impact'
-                      : '3 min speech, word timestamps, authentic idioms, high priority phrases'}
+                      ? 'bite the bullet, put off, paralyzing fear, profound impact'
+                      : 'Authentic idioms, high priority phrases, 3 min speech'}
                   </p>
                 </button>
 
@@ -200,13 +281,35 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
                     <span className="font-semibold text-xs text-slate-200">
-                      {locale === 'fa' ? 'سخنرانی استیو جابز (استنفورد)' : 'Steve Jobs Stanford Address'}
+                      {locale === 'fa' ? 'استیو جابز (استنفورد)' : 'Steve Jobs Stanford'}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1">
                     {locale === 'fa'
-                      ? 'شامل اصطلاحات: connect the dots, gut feeling, drop out, stay hungry'
-                      : 'Iconic talk on trusting destiny, authentic colloquial speech & phrasal verbs'}
+                      ? 'connect the dots, gut feeling, drop out, stay hungry'
+                      : 'Iconic talk on trusting destiny, authentic speech & idioms'}
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handlePresetSelect('simon_sinek')}
+                  className={`p-3.5 rounded-xl border text-left transition-all ${
+                    selectedPresetKey === 'simon_sinek'
+                      ? 'bg-cyan-500/10 border-cyan-500/50 text-white shadow-sm'
+                      : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span className="font-semibold text-xs text-slate-200">
+                      {locale === 'fa' ? 'سایمون سینک (شروع با چرا)' : 'Simon Sinek Start With Why'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    {locale === 'fa'
+                      ? 'gut decision, hold back, stand out, ripple effect'
+                      : 'Golden Circle, leadership phrasal verbs, authentic delivery'}
                   </p>
                 </button>
               </div>
@@ -257,6 +360,167 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                 className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
               />
             </div>
+
+            {/* Custom Video Speech Transcript & Subtitles (Only when custom file/video selected) */}
+            {selectedPresetKey === 'custom' && (
+              <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-white flex items-center gap-2">
+                    <Subtitles className="w-4 h-4 text-cyan-400" />
+                    <span>
+                      {locale === 'fa'
+                        ? 'متن گفتار و زیرنویس این ویدیو'
+                        : 'Video Speech Transcript & Subtitles'}
+                    </span>
+                  </label>
+                  <span className="text-[10px] text-cyan-400 font-mono">
+                    {customSegments.length > 0
+                      ? `${customSegments.length} ${locale === 'fa' ? 'جمله آماده' : 'segments ready'}`
+                      : locale === 'fa' ? 'انتخابی / خودکار' : 'Optional / Auto'}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {locale === 'fa'
+                    ? 'برای جلوگیری از متن تکراری پیش‌فرض، می‌توانید متن گفتار اختصاصی ویدیوی خود را وارد کنید، فایل زیرنویس آپلود نمایید، یا با هوش مصنوعی متن گفتار متناسب با عنوان بسازید.'
+                    : 'Provide your own video script, upload a subtitle file (.srt), or let AI generate authentic speech tailored to your video title.'}
+                </p>
+
+                {/* Sub-tabs */}
+                <div className="flex gap-2 border-b border-slate-800 pb-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptTab('ai')}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                      transcriptTab === 'ai'
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                    }`}
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>{locale === 'fa' ? 'تولید هوشمند با هوش مصنوعی' : 'AI Speech Generator'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptTab('paste')}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                      transcriptTab === 'paste'
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                    }`}
+                  >
+                    <FileText className="w-3 h-3" />
+                    <span>{locale === 'fa' ? 'چسباندن متن' : 'Paste Script'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptTab('upload')}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                      transcriptTab === 'upload'
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                    }`}
+                  >
+                    <UploadCloud className="w-3 h-3" />
+                    <span>{locale === 'fa' ? 'آپلود زیرنویس (.srt)' : 'Upload Subtitles'}</span>
+                  </button>
+                </div>
+
+                {/* TAB 1: AI */}
+                {transcriptTab === 'ai' && (
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleGenerateCustomSpeech}
+                      disabled={isGeneratingCustomSpeech}
+                      className="w-full py-2 px-3 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                    >
+                      {isGeneratingCustomSpeech ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>{locale === 'fa' ? 'در حال ایجاد گفتار اختصاصی...' : 'Generating speech...'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>
+                            {locale === 'fa'
+                              ? 'ایجاد متن گفتار متناسب با عنوان ویدیو'
+                              : 'Generate Speech Transcript from Title'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* TAB 2: PASTE */}
+                {transcriptTab === 'paste' && (
+                  <div className="space-y-2 pt-1">
+                    <textarea
+                      value={customTranscriptText}
+                      onChange={(e) => setCustomTranscriptText(e.target.value)}
+                      placeholder="Paste English speech lines here..."
+                      rows={3}
+                      className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleParseCustomText}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold"
+                    >
+                      {locale === 'fa' ? 'تفکیک جملات' : 'Parse Sentences'}
+                    </button>
+                  </div>
+                )}
+
+                {/* TAB 3: UPLOAD SUBTITLE */}
+                {transcriptTab === 'upload' && (
+                  <div className="pt-1">
+                    <label className="border border-dashed border-slate-700 hover:border-cyan-500/60 rounded-lg p-3 flex items-center justify-center gap-2 cursor-pointer bg-slate-900/40 hover:bg-slate-900 transition-colors">
+                      <input
+                        type="file"
+                        accept=".srt,.vtt,.txt"
+                        onChange={handleCustomSubtitleUpload}
+                        className="sr-only"
+                      />
+                      <UploadCloud className="w-4 h-4 text-cyan-400" />
+                      <span className="text-xs text-slate-300">
+                        {locale === 'fa' ? 'انتخاب فایل SRT یا VTT' : 'Select .srt or .vtt subtitle file'}
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                {/* Segments Preview */}
+                {customSegments.length > 0 && (
+                  <div className="p-2.5 rounded-lg bg-slate-900/90 border border-cyan-500/20 text-xs space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-emerald-400 font-semibold text-[11px]">
+                      <Check className="w-3.5 h-3.5" />
+                      <span>
+                        {locale === 'fa'
+                          ? `${customSegments.length} جمله گفتاری برای آموزش تفکیک شد:`
+                          : `${customSegments.length} authentic spoken sentences parsed:`}
+                      </span>
+                    </div>
+                    <div className="max-h-24 overflow-y-auto space-y-1 pr-1">
+                      {customSegments.slice(0, 4).map((s, idx) => (
+                        <div key={idx} className="text-[11px] text-slate-300 truncate bg-slate-950 p-1.5 rounded border border-slate-800">
+                          {s.text}
+                        </div>
+                      ))}
+                      {customSegments.length > 4 && (
+                        <span className="text-[10px] text-slate-500">
+                          +{customSegments.length - 4} more sentences
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Learner Level & Segments Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

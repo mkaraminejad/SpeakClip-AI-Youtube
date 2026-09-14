@@ -3,9 +3,11 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
-import { SAMPLE_PROJECT } from './src/data/sampleProject';
+import { SAMPLE_PROJECT, STEVE_JOBS_PROJECT, SIMON_SINEK_PROJECT, getPresetProject } from './src/data/presets';
 import { Project, LessonItem, SceneDefinition, TranscriptSegment, AIModelConfig } from './src/types';
 import { runAICompletion, getDefaultAIConfig, cleanJsonString } from './server/aiRunner';
+import { generateSegmentsForTitle, generateDynamicLessonItemsFromSegments } from './server/lessonGenerator';
+import { parseAnyTranscriptInput } from './src/lib/transcriptParser';
 
 dotenv.config();
 
@@ -15,9 +17,11 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Initialize in-memory project store seeded with sample project
+// Initialize in-memory project store seeded with diverse iconic speeches
 const projectsStore: Map<string, Project> = new Map();
 projectsStore.set(SAMPLE_PROJECT.id, JSON.parse(JSON.stringify(SAMPLE_PROJECT)));
+projectsStore.set(STEVE_JOBS_PROJECT.id, JSON.parse(JSON.stringify(STEVE_JOBS_PROJECT)));
+projectsStore.set(SIMON_SINEK_PROJECT.id, JSON.parse(JSON.stringify(SIMON_SINEK_PROJECT)));
 
 // Initialize Gemini Client
 function getGeminiClient(): GoogleGenAI | null {
@@ -344,7 +348,7 @@ app.get('/api/projects', (req, res) => {
 });
 
 // POST /api/projects
-app.post('/api/projects', (req, res) => {
+app.post('/api/projects', async (req, res) => {
   const {
     title,
     description,
@@ -357,6 +361,8 @@ app.post('/api/projects', (req, res) => {
     mediaFileName,
     mediaDuration = 120,
     sampleKey,
+    customTranscript,
+    transcriptSegments,
   } = req.body;
 
   if (!title) {
@@ -423,13 +429,46 @@ app.post('/api/projects', (req, res) => {
     currentRenderingProgress: 0,
   };
 
-  // If user picked a preset sample speech
-  if (sampleKey === 'fear_talk') {
-    newProject.transcript = JSON.parse(JSON.stringify(SAMPLE_PROJECT.transcript));
-    newProject.lessonItems = JSON.parse(JSON.stringify(SAMPLE_PROJECT.lessonItems));
-    newProject.scenes = JSON.parse(JSON.stringify(SAMPLE_PROJECT.scenes));
-    newProject.status = 'ready';
-    newProject.currentRenderingProgress = 100;
+  // Case 1: Preset sample speech chosen
+  if (sampleKey && sampleKey !== 'custom') {
+    const preset = getPresetProject(sampleKey);
+    if (preset) {
+      newProject.transcript = JSON.parse(JSON.stringify(preset.transcript));
+      newProject.lessonItems = JSON.parse(JSON.stringify(preset.lessonItems));
+      newProject.scenes = JSON.parse(JSON.stringify(preset.scenes));
+      newProject.status = 'ready';
+      newProject.currentRenderingProgress = 100;
+    }
+  } else {
+    // Case 2: User provided explicit segments (e.g. from subtitle upload or wizard preview)
+    if (Array.isArray(transcriptSegments) && transcriptSegments.length > 0) {
+      newProject.transcript.segments = transcriptSegments;
+      newProject.transcript.fullText = transcriptSegments.map((s: any) => s.text).join(' ');
+      newProject.lessonItems = generateDynamicLessonItemsFromSegments(transcriptSegments, newProject);
+      newProject.scenes = generateScenesForProject(newProject);
+      newProject.status = 'ready';
+      newProject.currentRenderingProgress = 100;
+    }
+    // Case 3: User pasted custom transcript text or SRT/VTT
+    else if (customTranscript && typeof customTranscript === 'string' && customTranscript.trim().length > 0) {
+      const parsedSegments = parseAnyTranscriptInput(customTranscript, newProject.mediaDuration);
+      newProject.transcript.segments = parsedSegments;
+      newProject.transcript.fullText = parsedSegments.map((s) => s.text).join(' ');
+      newProject.lessonItems = generateDynamicLessonItemsFromSegments(parsedSegments, newProject);
+      newProject.scenes = generateScenesForProject(newProject);
+      newProject.status = 'ready';
+      newProject.currentRenderingProgress = 100;
+    }
+    // Case 4: Custom video uploaded without transcript -> dynamically generate speech matching THIS video title!
+    else {
+      const generatedSegments = await generateSegmentsForTitle(title, newProject, newProject.mediaDuration);
+      newProject.transcript.segments = generatedSegments;
+      newProject.transcript.fullText = generatedSegments.map((s) => s.text).join(' ');
+      newProject.lessonItems = generateDynamicLessonItemsFromSegments(generatedSegments, newProject);
+      newProject.scenes = generateScenesForProject(newProject);
+      newProject.status = 'ready';
+      newProject.currentRenderingProgress = 100;
+    }
   }
 
   projectsStore.set(id, newProject);
@@ -542,11 +581,20 @@ ${transcriptToProcess}
         project.transcript.fullText = parsedSegments.map((s: any) => s.text).join(' ');
       }
     } else {
-      // Fallback: If no API key or no custom transcript, initialize with high-grade synthetic segments
+      // Fallback: If no API key or short input, generate or parse segments specific to THIS project
       if (project.transcript.segments.length === 0) {
-        project.transcript = JSON.parse(JSON.stringify(SAMPLE_PROJECT.transcript));
+        if (transcriptToProcess && transcriptToProcess.trim().length > 0) {
+          project.transcript.segments = parseAnyTranscriptInput(transcriptToProcess, project.mediaDuration);
+        } else {
+          project.transcript.segments = await generateSegmentsForTitle(project.title, project, project.mediaDuration);
+        }
+        project.transcript.fullText = project.transcript.segments.map((s) => s.text).join(' ');
       }
     }
+
+    // Synchronize lesson items and scenes to match current segments
+    project.lessonItems = generateDynamicLessonItemsFromSegments(project.transcript.segments, project);
+    project.scenes = generateScenesForProject(project);
 
     project.status = 'ready';
     project.updatedAt = new Date().toISOString();
@@ -555,14 +603,64 @@ ${transcriptToProcess}
     res.json({ project });
   } catch (err: any) {
     console.error('Transcription error:', err);
-    // Graceful fallback to guarantee user progress
+    // Graceful fallback tailored to THIS project title
     if (project.transcript.segments.length === 0) {
-      project.transcript = JSON.parse(JSON.stringify(SAMPLE_PROJECT.transcript));
+      if (transcriptToProcess && transcriptToProcess.trim().length > 0) {
+        project.transcript.segments = parseAnyTranscriptInput(transcriptToProcess, project.mediaDuration);
+      } else {
+        project.transcript.segments = await generateSegmentsForTitle(project.title, project, project.mediaDuration);
+      }
+      project.transcript.fullText = project.transcript.segments.map((s) => s.text).join(' ');
     }
+    project.lessonItems = generateDynamicLessonItemsFromSegments(project.transcript.segments, project);
+    project.scenes = generateScenesForProject(project);
     project.status = 'ready';
     projectsStore.set(project.id, project);
-    res.json({ project, warning: 'Transcription completed with fallback segmentation.' });
+    res.json({ project, warning: 'Transcription completed with tailored speech segmentation.' });
   }
+});
+
+// POST /api/generate-transcript - Auto generate custom speech segments matching video title
+app.post('/api/generate-transcript', async (req, res) => {
+  const { title, duration = 120 } = req.body;
+  if (!title) {
+    res.status(400).json({ error: 'Title is required to generate speech transcript' });
+    return;
+  }
+  try {
+    const segments = await generateSegmentsForTitle(title, undefined, Number(duration) || 120);
+    res.json({ segments, fullText: segments.map((s) => s.text).join(' ') });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to generate transcript' });
+  }
+});
+
+// PUT /api/projects/:id/transcript - Direct update of project transcript segments or raw text
+app.put('/api/projects/:id/transcript', (req, res) => {
+  const project = projectsStore.get(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: 'Project not found' });
+    return;
+  }
+
+  const { segments, fullText, rawText } = req.body;
+
+  if (Array.isArray(segments) && segments.length > 0) {
+    project.transcript.segments = segments;
+    project.transcript.fullText = fullText || segments.map((s: any) => s.text).join(' ');
+  } else if (rawText && typeof rawText === 'string') {
+    project.transcript.segments = parseAnyTranscriptInput(rawText, project.mediaDuration);
+    project.transcript.fullText = project.transcript.segments.map((s) => s.text).join(' ');
+  }
+
+  // Update dynamic lesson items & scenes matching the new transcript
+  project.lessonItems = generateDynamicLessonItemsFromSegments(project.transcript.segments, project);
+  project.scenes = generateScenesForProject(project);
+  project.status = 'ready';
+  project.updatedAt = new Date().toISOString();
+  projectsStore.set(project.id, project);
+
+  res.json({ project });
 });
 
 // POST /api/projects/:id/analyze
@@ -776,8 +874,8 @@ ${JSON.stringify(
           resItem.narration_script_fa || `در این بخش عبارت ${resItem.original_sentence.slice(0, 30)} را یاد می‌گیریم.`,
       }));
     } else {
-      // Fallback with template items if offline/no key
-      project.lessonItems = JSON.parse(JSON.stringify(SAMPLE_PROJECT.lessonItems));
+      // Fallback generated dynamically from THIS project's actual transcript segments
+      project.lessonItems = generateDynamicLessonItemsFromSegments(project.transcript.segments, project);
     }
 
     // Automatically construct the scenes timeline
@@ -789,12 +887,12 @@ ${JSON.stringify(
     res.json({ project });
   } catch (err: any) {
     console.error('AI Analysis failed:', err);
-    // Robust fallback
-    project.lessonItems = JSON.parse(JSON.stringify(SAMPLE_PROJECT.lessonItems));
+    // Dynamic fallback matching user's actual segments
+    project.lessonItems = generateDynamicLessonItemsFromSegments(project.transcript.segments, project);
     project.scenes = generateScenesForProject(project);
     project.status = 'ready';
     projectsStore.set(project.id, project);
-    res.json({ project, warning: 'AI analysis used curated linguistic template.' });
+    res.json({ project, warning: 'Linguistic analysis tailored dynamically to project transcript.' });
   }
 });
 
@@ -999,14 +1097,21 @@ app.get('/api/projects/:id/export', (req, res) => {
 
     if (item.useful_grammar_pattern) {
       markdownNotes += `#### 📐 Grammar Pattern:\n`;
-      markdownNotes += `* **${item.useful_grammar_pattern.pattern_name}**: ${item.useful_grammar_pattern.explanation_fa}\n  * *Example*: "${item.useful_grammar_pattern.example}"\n\n`;
+      if (typeof item.useful_grammar_pattern === 'string') {
+        markdownNotes += `* ${item.useful_grammar_pattern}\n\n`;
+      } else {
+        markdownNotes += `* **${item.useful_grammar_pattern.pattern_name}**: ${item.useful_grammar_pattern.explanation_fa}\n  * *Example*: "${item.useful_grammar_pattern.example}"\n\n`;
+      }
     }
 
     if (item.comprehension_question) {
       markdownNotes += `#### ❓ Comprehension Question:\n`;
-      markdownNotes += `* **${item.comprehension_question.question_en}** (${item.comprehension_question.question_fa})\n`;
+      const qText = item.comprehension_question.question_en || item.comprehension_question.question || '';
+      const qFa = item.comprehension_question.question_fa ? ` (${item.comprehension_question.question_fa})` : '';
+      markdownNotes += `* **${qText}**${qFa}\n`;
+      const correctIdx = item.comprehension_question.correct_option_index ?? item.comprehension_question.correctOptionIndex ?? 0;
       item.comprehension_question.options.forEach((opt, oIdx) => {
-        markdownNotes += `  ${oIdx === item.comprehension_question.correct_option_index ? '✅' : '⚪'} ${opt}\n`;
+        markdownNotes += `  ${oIdx === correctIdx ? '✅' : '⚪'} ${opt}\n`;
       });
       markdownNotes += `\n`;
     }

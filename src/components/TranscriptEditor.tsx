@@ -14,9 +14,17 @@ import {
   Check,
   RotateCcw,
   VolumeX,
+  Volume1,
+  Upload,
+  Headphones,
+  Music,
+  Radio,
+  FileAudio,
+  FileText,
 } from 'lucide-react';
 import { Project, TranscriptSegment } from '../types';
 import { Locale, translations } from '../lib/i18n';
+import { TranscriptImportModal } from './TranscriptImportModal';
 
 interface TranscriptEditorProps {
   project: Project;
@@ -35,32 +43,138 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(2.5);
   const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState<number>(1);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
-  // Playback timer simulation
-  useEffect(() => {
-    let interval: any;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        setCurrentTime((prev) => {
-          if (prev >= project.mediaDuration) {
-            setIsPlaying(false);
-            return 0;
-          }
-          return Number((prev + 0.2).toFixed(1));
-        });
-      }, 200);
+  // Audio Mode: 'tts' (speech synthesis) or 'media' (real audio track)
+  const [localAudioUrl, setLocalAudioUrl] = useState<string | null>(project.mediaUrl || null);
+  const [audioMode, setAudioMode] = useState<'tts' | 'media'>(project.mediaUrl ? 'media' : 'tts');
+
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastSpokenSegmentId = useRef<string | null>(null);
+
+  // Synthesize English speech using Web Speech API
+  const speakSegment = (text: string) => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      if (isMuted) return;
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'en-US';
+      utterance.rate = playbackSpeed;
+      utterance.volume = isMuted ? 0 : volume;
+
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
+
+      window.speechSynthesis.speak(utterance);
     }
-    return () => clearInterval(interval);
-  }, [isPlaying, project.mediaDuration]);
+  };
 
   // Find active segment
   const activeSegment = project.transcript.segments.find(
     (s) => currentTime >= s.start && currentTime <= s.end
   );
+
+  // Handle Play/Pause toggle
+  const togglePlay = () => {
+    const nextPlay = !isPlaying;
+    setIsPlaying(nextPlay);
+
+    if (nextPlay) {
+      if (audioMode === 'media' && localAudioUrl && audioRef.current) {
+        audioRef.current.currentTime = currentTime;
+        audioRef.current.playbackRate = playbackSpeed;
+        audioRef.current.muted = isMuted;
+        audioRef.current.volume = volume;
+        audioRef.current.play().catch((err) => {
+          console.warn('Audio play request failed or was blocked:', err);
+        });
+      } else if (audioMode === 'tts') {
+        const target = activeSegment || project.transcript.segments.find((s) => s.start >= currentTime);
+        if (target) {
+          lastSpokenSegmentId.current = target.id;
+          speakSegment(target.text);
+        }
+      }
+    } else {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      setIsSpeaking(false);
+    }
+  };
+
+  // Playback timer simulation (used for TTS mode or when no audio file is loaded)
+  useEffect(() => {
+    let interval: any;
+    if (isPlaying && (audioMode === 'tts' || !localAudioUrl)) {
+      interval = setInterval(() => {
+        setCurrentTime((prev) => {
+          if (prev >= project.mediaDuration) {
+            setIsPlaying(false);
+            if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+              window.speechSynthesis.cancel();
+            }
+            return 0;
+          }
+          return Number((prev + 0.2).toFixed(1));
+        });
+      }, 200 / playbackSpeed);
+    }
+    return () => clearInterval(interval);
+  }, [isPlaying, project.mediaDuration, audioMode, localAudioUrl, playbackSpeed]);
+
+  // Synchronize TTS speech with active segment changes during playback
+  useEffect(() => {
+    if (isPlaying && audioMode === 'tts' && activeSegment) {
+      if (activeSegment.id !== lastSpokenSegmentId.current) {
+        lastSpokenSegmentId.current = activeSegment.id;
+        speakSegment(activeSegment.text);
+      }
+    }
+  }, [activeSegment?.id, isPlaying, audioMode]);
+
+  // Sync volume / mute changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.muted = isMuted;
+      audioRef.current.volume = volume;
+    }
+    if (isMuted && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  }, [isMuted, volume]);
+
+  const handleAudioFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setLocalAudioUrl(url);
+      setAudioMode('media');
+      setIsPlaying(false);
+      setCurrentTime(0);
+
+      const updated = {
+        ...project,
+        mediaUrl: url,
+        mediaFileName: file.name,
+      };
+      onUpdateProject(updated);
+    }
+  };
 
   const handleToggleTeaching = (segmentId: string) => {
     const updatedSegments = project.transcript.segments.map((s) =>
@@ -206,11 +320,22 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <button
+            type="button"
+            onClick={() => setIsImportModalOpen(true)}
+            className="flex items-center gap-2 px-3.5 py-2 sm:py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 text-xs sm:text-sm font-semibold border border-slate-700 hover:border-cyan-500/50 transition-all shadow-sm"
+          >
+            <FileText className="w-4 h-4 text-cyan-400" />
+            <span>
+              {locale === 'fa' ? 'جایگزینی / وارد کردن متن' : 'Import / Replace Transcript'}
+            </span>
+          </button>
+
           <button
             onClick={handleAnalyzeWithAI}
             disabled={isAnalyzing}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-xs sm:text-sm font-bold shadow-lg shadow-cyan-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+            className="flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-xs sm:text-sm font-bold shadow-lg shadow-cyan-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
           >
             <Sparkles className="w-4 h-4" />
             <span>{isAnalyzing ? t.analyzingSpeech : t.analyzeWithAI}</span>
@@ -280,8 +405,34 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
               </div>
             </div>
 
+            {/* Hidden Audio Element for authentic media playback */}
+            {localAudioUrl && (
+              <audio
+                ref={audioRef}
+                src={localAudioUrl}
+                preload="auto"
+                onTimeUpdate={() => {
+                  if (audioRef.current && audioMode === 'media') {
+                    setCurrentTime(Number(audioRef.current.currentTime.toFixed(1)));
+                  }
+                }}
+                onEnded={() => {
+                  setIsPlaying(false);
+                }}
+              />
+            )}
+
+            {/* Hidden file input for uploading custom audio */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="audio/*,video/*"
+              onChange={handleAudioFileUpload}
+              className="hidden"
+            />
+
             {/* Playback Controls & Scrubber */}
-            <div className="p-4 bg-slate-950/60 space-y-3">
+            <div className="p-4 bg-slate-950/80 space-y-3 border-t border-slate-800/80">
               {/* Scrub Slider */}
               <input
                 type="range"
@@ -289,51 +440,200 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
                 max={project.mediaDuration || 180}
                 step="0.1"
                 value={currentTime}
-                onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                onChange={(e) => {
+                  const newTime = parseFloat(e.target.value);
+                  setCurrentTime(newTime);
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = newTime;
+                  }
+                  if (audioMode === 'tts' && isPlaying) {
+                    window.speechSynthesis?.cancel();
+                  }
+                }}
                 className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
               />
 
-              <div className="flex items-center justify-between text-xs text-slate-400">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setIsPlaying(!isPlaying)}
-                    className="w-8 h-8 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-white flex items-center justify-center transition-colors shadow-md shadow-cyan-500/20"
+                    onClick={togglePlay}
+                    className="w-9 h-9 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-white flex items-center justify-center transition-all shadow-md shadow-cyan-500/20 active:scale-95"
+                    title={isPlaying ? t.pause : t.play}
                   >
                     {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
                   </button>
 
                   <button
-                    onClick={() => setCurrentTime(0)}
+                    onClick={() => {
+                      setCurrentTime(0);
+                      if (audioRef.current) {
+                        audioRef.current.currentTime = 0;
+                      }
+                      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+                        window.speechSynthesis.cancel();
+                      }
+                      setIsSpeaking(false);
+                    }}
                     className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
                     title="Restart"
                   >
                     <RotateCcw className="w-4 h-4" />
                   </button>
 
-                  <button
-                    onClick={() => setIsMuted(!isMuted)}
-                    className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
-                  >
-                    {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                  </button>
+                  {/* Mute & Volume */}
+                  <div className="flex items-center gap-1.5 pl-1 border-l border-slate-800">
+                    <button
+                      onClick={() => setIsMuted(!isMuted)}
+                      className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+                      title={isMuted ? 'Unmute' : 'Mute'}
+                    >
+                      {isMuted ? (
+                        <VolumeX className="w-4 h-4 text-rose-400" />
+                      ) : volume < 0.5 ? (
+                        <Volume1 className="w-4 h-4 text-cyan-400" />
+                      ) : (
+                        <Volume2 className="w-4 h-4 text-cyan-400" />
+                      )}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={isMuted ? 0 : volume}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setVolume(val);
+                        if (val > 0 && isMuted) setIsMuted(false);
+                      }}
+                      className="w-14 h-1 bg-slate-800 rounded appearance-none accent-cyan-400 cursor-pointer"
+                      title={`Volume: ${Math.round(volume * 100)}%`}
+                    />
+                  </div>
+
+                  {/* Playback Speed */}
+                  <div className="flex items-center rounded-lg bg-slate-900 border border-slate-800 p-0.5 text-[10px] font-mono">
+                    {[0.8, 1.0, 1.25].map((speed) => (
+                      <button
+                        key={speed}
+                        onClick={() => {
+                          setPlaybackSpeed(speed);
+                          if (audioRef.current) {
+                            audioRef.current.playbackRate = speed;
+                          }
+                        }}
+                        className={`px-1.5 py-0.5 rounded transition-colors ${
+                          playbackSpeed === speed
+                            ? 'bg-cyan-500 text-white font-bold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {speed}x
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                <span className="font-mono text-[11px] text-slate-300">
-                  {formatTime(currentTime)} / {formatTime(project.mediaDuration)}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-slate-300">
+                    {formatTime(currentTime)} / {formatTime(project.mediaDuration)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Audio Source Engine Switch & Status Bar */}
+              <div className="pt-2 border-t border-slate-850 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-medium">
+                    {locale === 'fa' ? 'منبع صوتی:' : 'Audio Engine:'}
+                  </span>
+
+                  <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+                    <button
+                      onClick={() => {
+                        setAudioMode('tts');
+                        if (audioRef.current) audioRef.current.pause();
+                      }}
+                      className={`px-2 py-1 rounded flex items-center gap-1 font-medium transition-colors ${
+                        audioMode === 'tts'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                      title={locale === 'fa' ? 'سنتز صوتی تلفظ هوشمند کلمات' : 'Browser Web Speech English TTS'}
+                    >
+                      <Headphones className="w-3 h-3" />
+                      <span>{locale === 'fa' ? 'سنتز صوتی (TTS)' : 'Web Speech TTS'}</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        if (!localAudioUrl) {
+                          fileInputRef.current?.click();
+                        } else {
+                          setAudioMode('media');
+                          window.speechSynthesis?.cancel();
+                        }
+                      }}
+                      className={`px-2 py-1 rounded flex items-center gap-1 font-medium transition-colors ${
+                        audioMode === 'media'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                      title={locale === 'fa' ? 'پخش فایل صوتی اصلی گفتار' : 'Original speech audio track'}
+                    >
+                      <FileAudio className="w-3 h-3" />
+                      <span>
+                        {localAudioUrl
+                          ? locale === 'fa'
+                            ? 'فایل صوتی اصلی'
+                            : 'Original Audio'
+                          : locale === 'fa'
+                          ? 'پیوست فایل صوتی'
+                          : 'Attach Audio'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Upload or Audio Status */}
+                <div className="flex items-center gap-2">
+                  {isSpeaking && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded-md border border-emerald-500/30 animate-pulse">
+                      <Volume2 className="w-3 h-3" />
+                      <span>{locale === 'fa' ? 'در حال تلفظ صدا...' : 'Audio playing...'}</span>
+                    </span>
+                  )}
+
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-[11px] text-slate-400 hover:text-cyan-400 flex items-center gap-1 underline underline-offset-2 transition-colors"
+                  >
+                    <Upload className="w-3 h-3" />
+                    <span>
+                      {localAudioUrl
+                        ? locale === 'fa'
+                          ? 'تغییر فایل صوتی'
+                          : 'Change audio'
+                        : locale === 'fa'
+                        ? 'بارگذاری فایل صوتی (.mp3)'
+                        : 'Upload .mp3 file'}
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
 
-          {/* Quick Stats Helper */}
-          <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2 text-xs">
-            <span className="font-semibold text-slate-200 block">
-              {locale === 'fa' ? 'راهنمای انتخاب بخش‌های آموزشی:' : 'Teaching Selection Guide:'}
-            </span>
-            <p className="text-slate-400 leading-relaxed">
+          {/* Quick Audio Note & Stats Helper */}
+          <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2 text-xs">
+            <div className="flex items-center gap-1.5 text-cyan-400 font-semibold">
+              <Headphones className="w-4 h-4" />
+              <span>{locale === 'fa' ? 'نحوه پخش صدا در این بخش:' : 'Audio Playback Guide:'}</span>
+            </div>
+            <p className="text-slate-400 leading-relaxed text-[11px]">
               {locale === 'fa'
-                ? 'فقط جملاتی را انتخاب کنید که شامل اصطلاح، فعل دوقسمتی یا کالوکیشن واقعی باشند. هوش مصنوعی بخش‌های تیک‌خورده را برای ساخت کلیپ تدریس آنالیز خواهد کرد.'
-                : 'Select sentences with genuine idioms, phrasal verbs, and collocations. Gemini AI extracts Persian explanations and quizzes for each selected segment.'}
+                ? 'با زدن دکمه Play یا دکمه «پخش صدا» در کنار هر جمله، تلفظ انگلیسی جمله با صدای طبیعی (TTS) پخش می‌شود. همچنین می‌توانید فایل صوتی واقعی سخنرانی (.mp3 یا .wav) را با دکمه بالا اضافه کنید تا صدای اصلی گوینده پخش شود.'
+                : 'Press Play or the "Listen" button beside each sentence to hear natural English pronunciation via Web Speech TTS. You can also upload your authentic audio track (.mp3 or .wav) to play the speaker\'s original voice.'}
             </p>
           </div>
         </div>
@@ -354,7 +654,30 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
 
           {/* Segments Scroll Area */}
           <div className="space-y-2.5 max-h-[600px] overflow-y-auto pr-1">
-            {filteredSegments.map((segment, index) => {
+            {filteredSegments.length === 0 ? (
+              <div className="p-8 rounded-2xl bg-slate-900/60 border border-slate-800 text-center space-y-4">
+                <FileText className="w-10 h-10 text-cyan-400 mx-auto opacity-80" />
+                <div className="space-y-1">
+                  <h4 className="text-sm font-bold text-white">
+                    {locale === 'fa' ? 'هنوز متنی برای این ویدیو ثبت نشده است' : 'No speech segments found for this video'}
+                  </h4>
+                  <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                    {locale === 'fa'
+                      ? 'می‌توانید متن گفتار این ویدیو را پیست کنید، فایل زیرنویس آپلود نمایید یا با هوش مصنوعی جملات گفتاری بسازید.'
+                      : 'You can paste speech text, upload subtitles, or let AI generate spoken sentences matching your video.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsImportModalOpen(true)}
+                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md transition-all inline-flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>{locale === 'fa' ? 'وارد کردن یا تولید متن ویدیو' : 'Import or Generate Transcript'}</span>
+                </button>
+              </div>
+            ) : (
+              filteredSegments.map((segment, index) => {
               const isSelected = segment.isSelectedForTeaching !== false;
               const isActive = currentTime >= segment.start && currentTime <= segment.end;
               const isEditing = editingSegmentId === segment.id;
@@ -372,7 +695,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
                 >
                   <div className="flex items-start justify-between gap-3">
                     {/* Timestamp & Selection */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={() => handleToggleTeaching(segment.id)}
                         className={`p-1 rounded transition-colors ${
@@ -386,14 +709,41 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
                       <button
                         onClick={() => {
                           setCurrentTime(segment.start);
-                          setIsPlaying(true);
+                          if (audioMode === 'media' && localAudioUrl && audioRef.current) {
+                            audioRef.current.currentTime = segment.start;
+                            audioRef.current.play();
+                            setIsPlaying(true);
+                          } else {
+                            speakSegment(segment.text);
+                            setIsPlaying(true);
+                          }
                         }}
-                        className="px-2 py-0.5 rounded bg-slate-950 text-slate-400 hover:text-cyan-300 font-mono text-[11px] border border-slate-800 flex items-center gap-1 transition-colors"
+                        className="px-2 py-0.5 rounded bg-slate-950 text-slate-300 hover:text-cyan-300 font-mono text-[11px] border border-slate-800 flex items-center gap-1 transition-colors"
+                        title={locale === 'fa' ? 'پرش به این زمان و پخش' : 'Seek and play'}
                       >
                         <Play className="w-2.5 h-2.5" />
                         <span>
                           {formatTime(segment.start)} - {formatTime(segment.end)}
                         </span>
+                      </button>
+
+                      {/* Quick Listen Button */}
+                      <button
+                        onClick={() => {
+                          setCurrentTime(segment.start);
+                          if (audioMode === 'media' && localAudioUrl && audioRef.current) {
+                            audioRef.current.currentTime = segment.start;
+                            audioRef.current.play();
+                            setIsPlaying(true);
+                          } else {
+                            speakSegment(segment.text);
+                          }
+                        }}
+                        className="px-2 py-0.5 rounded bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/30 font-mono text-[11px] flex items-center gap-1 transition-colors"
+                        title={locale === 'fa' ? 'شنیدن تلفظ این جمله' : 'Listen to this sentence'}
+                      >
+                        <Volume2 className="w-3 h-3 text-cyan-400" />
+                        <span className="text-[10px]">{locale === 'fa' ? 'شنیدن صدا' : 'Listen'}</span>
                       </button>
                     </div>
 
@@ -460,10 +810,20 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
                   </div>
                 </div>
               );
-            })}
+            })
+          )}
           </div>
         </div>
       </div>
+
+      {/* Transcript Import & Generation Modal */}
+      <TranscriptImportModal
+        project={project}
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSave={onUpdateProject}
+        locale={locale}
+      />
     </div>
   );
 };

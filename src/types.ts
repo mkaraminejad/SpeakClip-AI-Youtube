@@ -22,6 +22,11 @@ export interface ExpressionDetail {
   common_learner_mistake?: string;
 }
 
+export type KeyVocabulary = ExpressionDetail;
+export type IdiomExpression = ExpressionDetail;
+export type PhrasalVerbExpression = ExpressionDetail;
+export type CollocationExpression = ExpressionDetail;
+
 export interface GrammarPattern {
   pattern_name: string;
   explanation_en: string;
@@ -30,11 +35,13 @@ export interface GrammarPattern {
 }
 
 export interface ComprehensionQuestion {
-  question_en: string;
-  question_fa: string;
+  question?: string;
+  question_en?: string;
+  question_fa?: string;
   options: string[];
-  correct_option_index: number;
-  explanation_fa: string;
+  correct_option_index?: number;
+  correctOptionIndex?: number;
+  explanation_fa?: string;
 }
 
 export interface LessonItem {
@@ -50,7 +57,7 @@ export interface LessonItem {
   idioms: ExpressionDetail[];
   phrasal_verbs: ExpressionDetail[];
   collocations: ExpressionDetail[];
-  useful_grammar_pattern?: GrammarPattern;
+  useful_grammar_pattern?: GrammarPattern | string;
   pronunciation_notes: string;
   cultural_or_context_note: string;
   simple_English_explanation: string;
