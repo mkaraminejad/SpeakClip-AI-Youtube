@@ -165,14 +165,29 @@ export function AIModelSettingsModal({
   } | null>(null);
   const [isSaved, setIsSaved] = useState<boolean>(false);
 
-  // Initialize from current project or default config
+  // Initialize from current project, localStorage, or default config
   useEffect(() => {
+    // 1. Try local storage first
+    let savedLocalConfig: AIModelConfig | null = null;
+    try {
+      const raw = localStorage.getItem('speakclip_ai_config');
+      if (raw) savedLocalConfig = JSON.parse(raw);
+    } catch (_) {}
+
     if (currentProject?.aiModelConfig) {
       setSelectedProvider(currentProject.aiModelConfig.provider);
       setSelectedModel(currentProject.aiModelConfig.modelName);
       if (currentProject.aiModelConfig.baseUrl) {
         setBaseUrl(currentProject.aiModelConfig.baseUrl);
       }
+      if (currentProject.aiModelConfig.apiKey) {
+        setCustomApiKey(currentProject.aiModelConfig.apiKey);
+      }
+    } else if (savedLocalConfig) {
+      setSelectedProvider(savedLocalConfig.provider || 'gemini');
+      setSelectedModel(savedLocalConfig.modelName || 'gemini-2.5-flash');
+      if (savedLocalConfig.baseUrl) setBaseUrl(savedLocalConfig.baseUrl);
+      if (savedLocalConfig.apiKey) setCustomApiKey(savedLocalConfig.apiKey);
     } else {
       // Fetch default config from server
       fetch('/api/ai/config')
@@ -182,6 +197,7 @@ export function AIModelSettingsModal({
             setSelectedProvider(data.current.provider || 'gemini');
             setSelectedModel(data.current.modelName || 'gemini-2.5-flash');
             if (data.current.baseUrl) setBaseUrl(data.current.baseUrl);
+            if (data.current.apiKey) setCustomApiKey(data.current.apiKey);
           }
         })
         .catch((e) => console.error('Could not fetch AI config:', e));
@@ -257,6 +273,23 @@ export function AIModelSettingsModal({
       apiKey: customApiKey || undefined,
     };
 
+    // 1. Persist to server active config
+    try {
+      await fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newConfig),
+      });
+    } catch (e) {
+      console.warn('Failed to sync global AI config to server', e);
+    }
+
+    // 2. Persist to browser localStorage
+    try {
+      localStorage.setItem('speakclip_ai_config', JSON.stringify(newConfig));
+    } catch (_) {}
+
+    // 3. Update active project if available
     if (currentProject) {
       try {
         await fetch(`/api/projects/${currentProject.id}/ai-config`, {

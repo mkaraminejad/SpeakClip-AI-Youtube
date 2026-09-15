@@ -5,8 +5,8 @@ import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import { SAMPLE_PROJECT, STEVE_JOBS_PROJECT, SIMON_SINEK_PROJECT, getPresetProject } from './src/data/presets';
 import { Project, LessonItem, SceneDefinition, TranscriptSegment, AIModelConfig } from './src/types';
-import { runAICompletion, getDefaultAIConfig, cleanJsonString } from './server/aiRunner';
-import { generateSegmentsForTitle, generateDynamicLessonItemsFromSegments } from './server/lessonGenerator';
+import { runAICompletion, getDefaultAIConfig, cleanJsonString, getActiveServerConfig, setActiveServerConfig, transcribeAudioWithGroqWhisper, extractJsonArray } from './server/aiRunner';
+import { generateSegmentsForTitle, generateDynamicLessonItemsFromSegments, generateAILessonItems } from './server/lessonGenerator';
 import { parseAnyTranscriptInput } from './src/lib/transcriptParser';
 
 dotenv.config();
@@ -202,9 +202,9 @@ app.get('/api/health', (req, res) => {
 
 // GET /api/ai/config - returns active AI provider details and available options
 app.get('/api/ai/config', (req, res) => {
-  const defaultConfig = getDefaultAIConfig();
+  const currentConfig = getActiveServerConfig();
   res.json({
-    current: defaultConfig,
+    current: currentConfig,
     availableProviders: [
       {
         id: 'gemini',
@@ -214,7 +214,7 @@ app.get('/api/ai/config', (req, res) => {
           { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Recommended - Fastest)', default: true },
           { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Deep Reasoning & Nuanced Idioms)' },
         ],
-        isConfigured: !!process.env.GEMINI_API_KEY,
+        isConfigured: !!(process.env.GEMINI_API_KEY || (currentConfig.provider === 'gemini' && currentConfig.apiKey)),
       },
       {
         id: 'groq',
@@ -226,7 +226,7 @@ app.get('/api/ai/config', (req, res) => {
           { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant (Ultra-fast)' },
           { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B (MoE 32k context)' },
         ],
-        isConfigured: !!process.env.GROQ_API_KEY,
+        isConfigured: !!(process.env.GROQ_API_KEY || (currentConfig.provider === 'groq' && currentConfig.apiKey)),
       },
       {
         id: 'openai',
@@ -236,7 +236,7 @@ app.get('/api/ai/config', (req, res) => {
           { id: 'gpt-4o', name: 'GPT-4o (Omni flagship)' },
           { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Fast & economical)' },
         ],
-        isConfigured: !!process.env.OPENAI_API_KEY,
+        isConfigured: !!(process.env.OPENAI_API_KEY || (currentConfig.provider === 'openai' && currentConfig.apiKey)),
       },
       {
         id: 'anthropic',
@@ -245,7 +245,7 @@ app.get('/api/ai/config', (req, res) => {
         models: [
           { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' },
         ],
-        isConfigured: !!process.env.ANTHROPIC_API_KEY,
+        isConfigured: !!(process.env.ANTHROPIC_API_KEY || (currentConfig.provider === 'anthropic' && currentConfig.apiKey)),
       },
       {
         id: 'local_ollama',
@@ -273,6 +273,111 @@ app.get('/api/ai/config', (req, res) => {
       },
     ],
   });
+});
+
+// POST /api/ai/config - updates active server AI configuration (persists across sessions)
+app.post('/api/ai/config', (req, res) => {
+  const { provider, modelName, baseUrl, apiKey, temperature } = req.body;
+  const updated = setActiveServerConfig({
+    ...(provider && { provider }),
+    ...(modelName && { modelName }),
+    ...(baseUrl && { baseUrl }),
+    ...(apiKey !== undefined && { apiKey }),
+    ...(temperature !== undefined && { temperature }),
+  });
+  console.log(`[AI Config] Active provider updated to ${updated.provider} (${updated.modelName})`);
+  res.json({ success: true, current: updated });
+});
+
+// POST /api/transcribe-media - Transcribe uploaded video/audio file using Groq Whisper or Gemini
+app.post('/api/transcribe-media', async (req, res) => {
+  const { fileBase64, fileName, mimeType, aiModelConfig } = req.body;
+  const config = aiModelConfig || getActiveServerConfig();
+  const startTime = Date.now();
+
+  if (!fileBase64) {
+    res.status(400).json({ error: 'Media file data (fileBase64) is required for transcription' });
+    return;
+  }
+
+  try {
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const groqKey = config.apiKey || getActiveServerConfig().apiKey || process.env.GROQ_API_KEY;
+
+    // If Groq is the provider, or Groq API key is present
+    if ((config.provider === 'groq' || groqKey?.startsWith('gsk_')) && groqKey) {
+      console.log(`[Groq Whisper] Transcribing ${fileName || 'video/audio'} with whisper-large-v3...`);
+      const whisperResult = await transcribeAudioWithGroqWhisper({
+        buffer,
+        filename: fileName || 'video_clip.mp4',
+        apiKey: groqKey,
+      });
+
+      const latencyMs = Date.now() - startTime;
+      console.log(`[Groq Whisper] Transcribed in ${latencyMs}ms (${whisperResult.segments.length} segments)`);
+
+      res.json({
+        success: true,
+        provider: 'groq-whisper',
+        model: 'whisper-large-v3',
+        latencyMs,
+        fullText: whisperResult.text,
+        segments: whisperResult.segments,
+      });
+      return;
+    }
+
+    // Fallback: Gemini multimodal transcription if Gemini key is available
+    const geminiKey = config.apiKey || getActiveServerConfig().apiKey || process.env.GEMINI_API_KEY;
+    if (geminiKey) {
+      console.log(`[Gemini] Transcribing audio with gemini-2.5-flash...`);
+      const ai = new GoogleGenAI({
+        apiKey: geminiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+
+      const prompt = `Transcribe the English speech in this audio/video file. Return a JSON object with key "segments": [ { "start": 0.0, "end": 4.5, "text": "..." } ]`;
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'video/mp4',
+                  data: fileBase64,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        config: { responseMimeType: 'application/json' },
+      });
+
+      const parsed = extractJsonArray(response.text || '');
+      const latencyMs = Date.now() - startTime;
+      res.json({
+        success: true,
+        provider: 'gemini',
+        model: 'gemini-2.5-flash',
+        latencyMs,
+        fullText: parsed.map((s: any) => s.text).join(' '),
+        segments: parsed,
+      });
+      return;
+    }
+
+    res.status(400).json({
+      error: 'Please enter your Groq API key (starts with gsk_) or Gemini API key in AI Model settings to transcribe this video.',
+    });
+  } catch (err: any) {
+    console.error('Media transcription error:', err);
+    res.status(500).json({
+      error: err.message || 'Failed to transcribe audio file',
+    });
+  }
 });
 
 // POST /api/ai/test-connection - tests ping/inference on selected provider
@@ -360,9 +465,11 @@ app.post('/api/projects', async (req, res) => {
     legalConfirmed = false,
     mediaFileName,
     mediaDuration = 120,
+    mediaUrl,
     sampleKey,
     customTranscript,
     transcriptSegments,
+    aiModelConfig,
   } = req.body;
 
   if (!title) {
@@ -378,6 +485,14 @@ app.post('/api/projects', async (req, res) => {
   }
 
   const id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const activeCfg = getActiveServerConfig();
+  const effectiveAIConfig: AIModelConfig = {
+    provider: aiModelConfig?.provider || activeCfg.provider,
+    modelName: aiModelConfig?.modelName || activeCfg.modelName,
+    baseUrl: aiModelConfig?.baseUrl || activeCfg.baseUrl,
+    apiKey: aiModelConfig?.apiKey || activeCfg.apiKey,
+    temperature: aiModelConfig?.temperature ?? activeCfg.temperature,
+  };
 
   // Default new project structure
   const newProject: Project = {
@@ -393,6 +508,7 @@ app.post('/api/projects', async (req, res) => {
     numSegments: Number(numSegments) || 5,
     tone,
     legalConfirmed: true,
+    mediaUrl: mediaUrl || undefined,
     mediaFileName: mediaFileName || 'speech_source_audio.mp4',
     mediaDuration: Number(mediaDuration) || 120,
     mediaType: 'video',
@@ -425,7 +541,7 @@ app.post('/api/projects', async (req, res) => {
     },
     lessonItems: [],
     scenes: [],
-    aiModelConfig: req.body.aiModelConfig || getDefaultAIConfig(),
+    aiModelConfig: effectiveAIConfig,
     currentRenderingProgress: 0,
   };
 
@@ -444,7 +560,7 @@ app.post('/api/projects', async (req, res) => {
     if (Array.isArray(transcriptSegments) && transcriptSegments.length > 0) {
       newProject.transcript.segments = transcriptSegments;
       newProject.transcript.fullText = transcriptSegments.map((s: any) => s.text).join(' ');
-      newProject.lessonItems = generateDynamicLessonItemsFromSegments(transcriptSegments, newProject);
+      newProject.lessonItems = await generateAILessonItems(transcriptSegments, newProject);
       newProject.scenes = generateScenesForProject(newProject);
       newProject.status = 'ready';
       newProject.currentRenderingProgress = 100;
@@ -454,7 +570,7 @@ app.post('/api/projects', async (req, res) => {
       const parsedSegments = parseAnyTranscriptInput(customTranscript, newProject.mediaDuration);
       newProject.transcript.segments = parsedSegments;
       newProject.transcript.fullText = parsedSegments.map((s) => s.text).join(' ');
-      newProject.lessonItems = generateDynamicLessonItemsFromSegments(parsedSegments, newProject);
+      newProject.lessonItems = await generateAILessonItems(parsedSegments, newProject);
       newProject.scenes = generateScenesForProject(newProject);
       newProject.status = 'ready';
       newProject.currentRenderingProgress = 100;
@@ -464,7 +580,7 @@ app.post('/api/projects', async (req, res) => {
       const generatedSegments = await generateSegmentsForTitle(title, newProject, newProject.mediaDuration);
       newProject.transcript.segments = generatedSegments;
       newProject.transcript.fullText = generatedSegments.map((s) => s.text).join(' ');
-      newProject.lessonItems = generateDynamicLessonItemsFromSegments(generatedSegments, newProject);
+      newProject.lessonItems = await generateAILessonItems(generatedSegments, newProject);
       newProject.scenes = generateScenesForProject(newProject);
       newProject.status = 'ready';
       newProject.currentRenderingProgress = 100;
@@ -622,13 +738,14 @@ ${transcriptToProcess}
 
 // POST /api/generate-transcript - Auto generate custom speech segments matching video title
 app.post('/api/generate-transcript', async (req, res) => {
-  const { title, duration = 120 } = req.body;
+  const { title, duration = 120, aiModelConfig } = req.body;
   if (!title) {
     res.status(400).json({ error: 'Title is required to generate speech transcript' });
     return;
   }
   try {
-    const segments = await generateSegmentsForTitle(title, undefined, Number(duration) || 120);
+    const config = aiModelConfig || getActiveServerConfig();
+    const segments = await generateSegmentsForTitle(title, { aiModelConfig: config } as any, Number(duration) || 120);
     res.json({ segments, fullText: segments.map((s) => s.text).join(' ') });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to generate transcript' });
@@ -829,7 +946,7 @@ ${JSON.stringify(
           },
         });
 
-      const parsedResults: any[] = JSON.parse(cleanJsonString(responseText) || '[]');
+      const parsedResults: any[] = extractJsonArray(responseText);
 
       project.lessonItems = parsedResults.map((resItem, idx) => ({
         id: `lesson_${Date.now()}_${idx}`,

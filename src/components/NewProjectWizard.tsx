@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   UploadCloud,
   FileVideo,
@@ -15,6 +15,9 @@ import {
   Subtitles,
   RefreshCw,
   Check,
+  Play,
+  Clock,
+  HardDrive,
 } from 'lucide-react';
 import { LearnerLevel, VideoFormat, TeachingTone, Project, AIProviderType, AIModelConfig, TranscriptSegment } from '../types';
 import { Locale, translations } from '../lib/i18n';
@@ -36,6 +39,17 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
 
   // Form State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(120);
+  const [fileBase64, setFileBase64] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [transcribeStatus, setTranscribeStatus] = useState<{
+    provider: string;
+    model: string;
+    latencyMs: number;
+    count: number;
+  } | null>(null);
+
   const [selectedPresetKey, setSelectedPresetKey] = useState<'fear_talk' | 'steve_jobs' | 'simon_sinek' | 'custom'>('fear_talk');
   const [projectTitle, setProjectTitle] = useState('Mastering Spoken English: Overcoming Fear & Taking Action');
   const [learnerLevel, setLearnerLevel] = useState<LearnerLevel>('B2');
@@ -44,6 +58,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
   const [tone, setTone] = useState<TeachingTone>('friendly');
   const [aiProvider, setAiProvider] = useState<AIProviderType>('gemini');
   const [aiModel, setAiModel] = useState<string>('gemini-2.5-flash');
+  const [aiApiKey, setAiApiKey] = useState<string>('');
   const [localBaseUrl, setLocalBaseUrl] = useState<string>('http://localhost:11434/v1');
   const [legalConfirmed, setLegalConfirmed] = useState<boolean>(true);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -55,6 +70,34 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
   const [isGeneratingCustomSpeech, setIsGeneratingCustomSpeech] = useState(false);
   const [transcriptTab, setTranscriptTab] = useState<'ai' | 'paste' | 'upload'>('ai');
 
+  // Load configured AI settings from localStorage or server
+  useEffect(() => {
+    let savedConfig: AIModelConfig | null = null;
+    try {
+      const raw = localStorage.getItem('speakclip_ai_config');
+      if (raw) savedConfig = JSON.parse(raw);
+    } catch (_) {}
+
+    if (savedConfig) {
+      setAiProvider(savedConfig.provider || 'gemini');
+      setAiModel(savedConfig.modelName || 'gemini-2.5-flash');
+      if (savedConfig.baseUrl) setLocalBaseUrl(savedConfig.baseUrl);
+      if (savedConfig.apiKey) setAiApiKey(savedConfig.apiKey);
+    } else {
+      fetch('/api/ai/config')
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.current) {
+            setAiProvider(data.current.provider || 'gemini');
+            setAiModel(data.current.modelName || 'gemini-2.5-flash');
+            if (data.current.baseUrl) setLocalBaseUrl(data.current.baseUrl);
+            if (data.current.apiKey) setAiApiKey(data.current.apiKey);
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -64,6 +107,79 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
       setProjectTitle(cleanTitle);
       setCustomSegments([]);
       setCustomTranscriptText('');
+      setTranscribeStatus(null);
+      setErrorMsg(null);
+
+      // Create preview URL
+      const url = URL.createObjectURL(file);
+      setVideoPreviewUrl(url);
+
+      // Read as base64 for Groq Whisper transcription
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const b64 = result.split(',')[1] || result;
+        setFileBase64(b64);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleTranscribeWithAI = async () => {
+    if (!selectedFile && !fileBase64) {
+      setErrorMsg('Please select a video file first.');
+      return;
+    }
+    setIsTranscribing(true);
+    setErrorMsg(null);
+
+    try {
+      let b64 = fileBase64;
+      if (!b64 && selectedFile) {
+        b64 = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve((r.result as string).split(',')[1]);
+          r.onerror = reject;
+          r.readAsDataURL(selectedFile);
+        });
+      }
+
+      const res = await fetch('/api/transcribe-media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileBase64: b64,
+          fileName: selectedFile?.name || 'video.mp4',
+          mimeType: selectedFile?.type || 'video/mp4',
+          aiModelConfig: {
+            provider: aiProvider,
+            modelName: aiModel,
+            baseUrl: (aiProvider === 'local_ollama' || aiProvider === 'custom_compatible') ? localBaseUrl : undefined,
+            apiKey: aiApiKey || undefined,
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to transcribe audio');
+
+      if (Array.isArray(data.segments) && data.segments.length > 0) {
+        setCustomSegments(data.segments);
+        setCustomTranscriptText(data.fullText || data.segments.map((s: any) => s.text).join(' '));
+        setTranscribeStatus({
+          provider: data.provider,
+          model: data.model,
+          latencyMs: data.latencyMs,
+          count: data.segments.length,
+        });
+      } else {
+        throw new Error('No speech segments detected in file.');
+      }
+    } catch (err: any) {
+      console.error('Transcription failed:', err);
+      setErrorMsg(err.message || 'Error transcribing media file with AI');
+    } finally {
+      setIsTranscribing(false);
     }
   };
 
@@ -169,7 +285,8 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
           tone,
           legalConfirmed,
           mediaFileName: selectedFile ? selectedFile.name : 'speech_source_video.mp4',
-          mediaDuration: selectedFile ? 180 : 184,
+          mediaDuration: Math.round(videoDuration) || (selectedFile ? 180 : 184),
+          mediaUrl: videoPreviewUrl || undefined,
           sampleKey: selectedPresetKey,
           customTranscript: customTranscriptText || undefined,
           transcriptSegments: customSegments.length > 0 ? customSegments : undefined,
@@ -177,6 +294,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
             provider: aiProvider,
             modelName: aiModel,
             baseUrl: (aiProvider === 'local_ollama' || aiProvider === 'custom_compatible') ? localBaseUrl : undefined,
+            apiKey: aiApiKey || undefined,
           },
         }),
       });
@@ -315,28 +433,183 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
               </div>
             </div>
 
-            {/* Custom Upload Dropzone */}
-            <div className="space-y-2">
+            {/* Custom Upload Dropzone / Video Verification Card */}
+            <div className="space-y-3">
               <span className="text-xs font-medium text-slate-400">
                 {locale === 'fa' ? 'یا آپلود فایل صوتی یا ویدیویی شخصی:' : 'Or upload your own MP4, MOV, MP3, or WAV:'}
               </span>
-              <label className="relative border-2 border-dashed border-slate-700/80 hover:border-cyan-500/60 bg-slate-950/40 hover:bg-slate-950/80 rounded-2xl p-6 flex flex-col items-center justify-center cursor-pointer transition-all group">
-                <input
-                  type="file"
-                  accept="video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/mp4"
-                  onChange={handleFileUpload}
-                  className="sr-only"
-                />
-                <div className="w-12 h-12 rounded-xl bg-slate-800/80 group-hover:bg-cyan-500/20 text-slate-400 group-hover:text-cyan-400 flex items-center justify-center transition-colors mb-3">
-                  <UploadCloud className="w-6 h-6" />
+
+              {selectedFile ? (
+                <div className="p-5 rounded-2xl bg-slate-950 border border-emerald-500/40 space-y-4 shadow-xl shadow-emerald-950/20">
+                  {/* Verified Header */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                        <CheckCircle2 className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                          <span>{selectedFile.name}</span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            {locale === 'fa' ? 'آپلود و تایید شد' : 'Uploaded & Verified'}
+                          </span>
+                        </h4>
+                        <p className="text-[11px] text-slate-400">
+                          {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB • {selectedFile.type || 'video/mp4'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="text-xs text-slate-400 hover:text-cyan-400 cursor-pointer px-3 py-1.5 border border-slate-800 hover:border-slate-700 rounded-lg bg-slate-900 transition-colors">
+                      {locale === 'fa' ? 'تغییر فایل' : 'Change Video'}
+                      <input
+                        type="file"
+                        accept="video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/mp4"
+                        onChange={handleFileUpload}
+                        className="sr-only"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Embedded Video Player for User Verification */}
+                  {videoPreviewUrl && (
+                    <div className="relative rounded-xl overflow-hidden border border-slate-800 bg-black aspect-video max-h-60 w-full flex items-center justify-center shadow-inner">
+                      <video
+                        src={videoPreviewUrl}
+                        controls
+                        playsInline
+                        onLoadedMetadata={(e) => {
+                          const v = e.currentTarget;
+                          if (v.duration && !isNaN(v.duration) && isFinite(v.duration)) {
+                            setVideoDuration(v.duration);
+                          }
+                        }}
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
+                  )}
+
+                  {/* Metadata Stats Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2">
+                      <HardDrive className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-slate-400 block">File Size</span>
+                        <span className="font-semibold text-slate-200 truncate block">
+                          {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-slate-400 block">Duration</span>
+                        <span className="font-semibold text-slate-200">
+                          {videoDuration ? `${Math.floor(videoDuration / 60)}:${Math.floor(videoDuration % 60).toString().padStart(2, '0')}` : 'Ready'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-purple-400 shrink-0" />
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-slate-400 block">Active AI Engine</span>
+                        <span className="font-semibold text-purple-300 capitalize truncate block">
+                          {aiProvider === 'groq' ? `Groq (${aiModel})` : aiProvider}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-slate-400 block">Status</span>
+                        <span className="font-semibold text-emerald-400 truncate block">
+                          {transcribeStatus ? 'Transcribed' : 'Ready'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Transcribe with Groq Action */}
+                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/10 via-slate-900 to-slate-900 border border-amber-500/30 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <div className="space-y-0.5 text-left">
+                      <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-amber-400" />
+                        <span>
+                          {locale === 'fa'
+                            ? 'استخراج و رونویسی گفتار با مدل هوش مصنوعی (Whisper)'
+                            : 'AI Speech Transcription (Groq Whisper / Gemini)'}
+                        </span>
+                      </span>
+                      <p className="text-[11px] text-slate-400">
+                        {locale === 'fa'
+                          ? 'استخراج فوری زمان‌بندی و جملات انگلیسی ویدیو جهت تولید خودکار آزمون و فلش‌کارت'
+                          : 'Extracts real timestamps & spoken sentences directly to build your vocabulary lessons.'}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleTranscribeWithAI}
+                      disabled={isTranscribing}
+                      className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap"
+                    >
+                      {isTranscribing ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>{locale === 'fa' ? 'در حال رونویسی هوشمند...' : 'Transcribing Speech...'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>
+                            {locale === 'fa'
+                              ? 'استخراج گفتار با هوش مصنوعی'
+                              : 'Transcribe with AI'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Transcribe Success Banner */}
+                  {transcribeStatus && (
+                    <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-300 animate-in fade-in">
+                      <div className="flex items-center gap-2">
+                        <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span>
+                          {locale === 'fa'
+                            ? `${transcribeStatus.count} جمله گفتاری با هوش مصنوعی استخراج شد (${transcribeStatus.latencyMs}ms)`
+                            : `Transcribed ${transcribeStatus.count} sentences with ${transcribeStatus.model} in ${transcribeStatus.latencyMs}ms`}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/20">
+                        {transcribeStatus.latencyMs}ms
+                      </span>
+                    </div>
+                  )}
                 </div>
-                <span className="text-sm font-semibold text-slate-200 text-center">
-                  {selectedFile ? selectedFile.name : t.uploadDropzone}
-                </span>
-                <span className="text-xs text-slate-500 mt-1">
-                  MP4, MOV, MP3, WAV (Up to 100MB, 2-8 minutes duration)
-                </span>
-              </label>
+              ) : (
+                <label className="relative border-2 border-dashed border-slate-700/80 hover:border-cyan-500/60 bg-slate-950/40 hover:bg-slate-950/80 rounded-2xl p-6 flex flex-col items-center justify-center cursor-pointer transition-all group">
+                  <input
+                    type="file"
+                    accept="video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/mp4"
+                    onChange={handleFileUpload}
+                    className="sr-only"
+                  />
+                  <div className="w-12 h-12 rounded-xl bg-slate-800/80 group-hover:bg-cyan-500/20 text-slate-400 group-hover:text-cyan-400 flex items-center justify-center transition-colors mb-3">
+                    <UploadCloud className="w-6 h-6" />
+                  </div>
+                  <span className="text-sm font-semibold text-slate-200 text-center">
+                    {t.uploadDropzone}
+                  </span>
+                  <span className="text-xs text-slate-500 mt-1">
+                    MP4, MOV, MP3, WAV (Up to 100MB, 2-8 minutes duration)
+                  </span>
+                </label>
+              )}
             </div>
           </div>
         )}
@@ -739,6 +1012,47 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                       ? 'مدل محلی به صورت مستقیم و بدون ارسال داده به خارج از سیستم شما اجرا می‌شود.'
                       : 'Audio and transcript will be processed completely offline on your local machine.'}
                   </p>
+                </div>
+              )}
+
+              {aiProvider === 'groq' && (
+                <div className="pt-2 space-y-2 text-xs border-t border-slate-800/80">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Groq Model Name (LLM):</label>
+                      <input
+                        type="text"
+                        value={aiModel}
+                        onChange={(e) => setAiModel(e.target.value)}
+                        placeholder="llama-3.3-70b-versatile or llama-3.1-8b-instant"
+                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Groq API Key:</label>
+                      <input
+                        type="password"
+                        value={aiApiKey}
+                        onChange={(e) => setAiApiKey(e.target.value)}
+                        placeholder="gsk_..."
+                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-amber-300/80">
+                      {locale === 'fa'
+                        ? 'پردازش با تراشه‌های LPU فوق‌سریع Groq و مدل Whisper برای رونویسی و تحلیل'
+                        : 'Ultra-fast Groq LPU inference for linguistic extraction & Whisper'}
+                    </span>
+                    {aiApiKey ? (
+                      <span className="text-emerald-400 flex items-center gap-1 font-semibold">
+                        <Check className="w-3 h-3" /> Key Ready
+                      </span>
+                    ) : (
+                      <span className="text-amber-400">Groq API key required (starts with gsk_)</span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
