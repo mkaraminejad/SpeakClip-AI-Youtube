@@ -10,10 +10,9 @@ export interface AIExecutionOptions {
 
 // In-memory active configuration persisted during server lifecycle
 let activeServerConfig: AIModelConfig = {
-  provider: (process.env.AI_PROVIDER as AIProviderType) || 'gemini',
-  modelName: process.env.AI_MODEL || (process.env.AI_PROVIDER === 'groq' ? 'llama-3.3-70b-versatile' : 'gemini-2.5-flash'),
-  baseUrl: process.env.AI_PROVIDER === 'groq' ? 'https://api.groq.com/openai/v1' : (process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434/v1'),
-  apiKey: process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY || '',
+  provider: 'gemini',
+  modelName: 'gemini-2.5-flash',
+  apiKey: process.env.GEMINI_API_KEY || '',
 };
 
 export function getActiveServerConfig(): AIModelConfig {
@@ -47,7 +46,8 @@ export async function runAICompletion(options: AIExecutionOptions): Promise<stri
 
   // 1. Google Gemini Provider
   if (provider === 'gemini') {
-    const apiKey = aiConfig.apiKey || activeServerConfig.apiKey || process.env.GEMINI_API_KEY;
+    const rawKey = aiConfig.apiKey || activeServerConfig.apiKey;
+    const apiKey = (rawKey && rawKey.length > 10 && rawKey !== 'abcd') ? rawKey : process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY environment variable is not configured');
     }

@@ -171,3 +171,38 @@ export function parseAnyTranscriptInput(
   // 3. Fallback to Plain Text
   return parsePlainTextToSegments(trimmed, estimatedDuration);
 }
+
+/**
+ * Formats seconds into SRT timestamp string HH:MM:SS,mmm
+ */
+export function formatSecondsToSrtTimestamp(seconds: number): string {
+  const secNum = Math.max(0, seconds || 0);
+  const hours = Math.floor(secNum / 3600);
+  const minutes = Math.floor((secNum % 3600) / 60);
+  const secs = Math.floor(secNum % 60);
+  const millis = Math.floor((secNum % 1) * 1000);
+
+  const hh = hours.toString().padStart(2, '0');
+  const mm = minutes.toString().padStart(2, '0');
+  const ss = secs.toString().padStart(2, '0');
+  const mmm = millis.toString().padStart(3, '0');
+
+  return `${hh}:${mm}:${ss},${mmm}`;
+}
+
+/**
+ * Converts an array of TranscriptSegment objects into standard .SRT subtitle text
+ */
+export function exportSegmentsToSrt(segments: TranscriptSegment[]): string {
+  if (!segments || segments.length === 0) return '';
+
+  return segments
+    .map((seg, idx) => {
+      const index = idx + 1;
+      const startStr = formatSecondsToSrtTimestamp(seg.start);
+      const endStr = formatSecondsToSrtTimestamp(seg.end > seg.start ? seg.end : seg.start + 3.5);
+      const text = (seg.text || '').trim();
+      return `${index}\n${startStr} --> ${endStr}\n${text}\n`;
+    })
+    .join('\n');
+}

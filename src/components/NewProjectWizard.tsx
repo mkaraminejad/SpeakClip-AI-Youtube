@@ -18,10 +18,16 @@ import {
   Play,
   Clock,
   HardDrive,
+  Download,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+  FileCode,
 } from 'lucide-react';
 import { LearnerLevel, VideoFormat, TeachingTone, Project, AIProviderType, AIModelConfig, TranscriptSegment } from '../types';
 import { Locale, translations } from '../lib/i18n';
-import { parseAnyTranscriptInput, parseSrt, parseVtt } from '../lib/transcriptParser';
+import { parseAnyTranscriptInput, parseSrt, parseVtt, exportSegmentsToSrt } from '../lib/transcriptParser';
+import { extractAudioForWhisper } from '../lib/audioExtractor';
 
 interface NewProjectWizardProps {
   locale: Locale;
@@ -69,6 +75,27 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
   const [customSegments, setCustomSegments] = useState<TranscriptSegment[]>([]);
   const [isGeneratingCustomSpeech, setIsGeneratingCustomSpeech] = useState(false);
   const [transcriptTab, setTranscriptTab] = useState<'ai' | 'paste' | 'upload'>('ai');
+  const [showSrtPreview, setShowSrtPreview] = useState<boolean>(false);
+  const [copyFeedback, setCopyFeedback] = useState<boolean>(false);
+  const [testConnectionStatus, setTestConnectionStatus] = useState<{
+    testing: boolean;
+    success?: boolean;
+    msg?: string;
+  }>({ testing: false });
+
+  // Save AI configuration helper
+  const saveAiConfig = (cfg: { provider?: AIProviderType; modelName?: string; apiKey?: string; baseUrl?: string }) => {
+    try {
+      const current = JSON.parse(localStorage.getItem('speakclip_ai_config') || '{}');
+      const updated = { ...current, ...cfg };
+      localStorage.setItem('speakclip_ai_config', JSON.stringify(updated));
+      fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated),
+      }).catch(() => {});
+    } catch (_) {}
+  };
 
   // Load configured AI settings from localStorage or server
   useEffect(() => {
@@ -114,20 +141,20 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
       const url = URL.createObjectURL(file);
       setVideoPreviewUrl(url);
 
-      // Read as base64 for Groq Whisper transcription
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result as string;
-        const b64 = result.split(',')[1] || result;
-        setFileBase64(b64);
+      // Estimate audio duration from audio element if possible
+      const tempMedia = document.createElement(file.type.startsWith('video/') ? 'video' : 'audio');
+      tempMedia.src = url;
+      tempMedia.onloadedmetadata = () => {
+        if (tempMedia.duration && !isNaN(tempMedia.duration)) {
+          setVideoDuration(tempMedia.duration);
+        }
       };
-      reader.readAsDataURL(file);
     }
   };
 
   const handleTranscribeWithAI = async () => {
     if (!selectedFile && !fileBase64) {
-      setErrorMsg('Please select a video file first.');
+      setErrorMsg(locale === 'fa' ? 'لطفاً ابتدا فایل ویدیو یا صوت را انتخاب کنید.' : 'Please select a video or audio file first.');
       return;
     }
     setIsTranscribing(true);
@@ -135,13 +162,30 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
 
     try {
       let b64 = fileBase64;
-      if (!b64 && selectedFile) {
-        b64 = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onload = () => resolve((r.result as string).split(',')[1]);
-          r.onerror = reject;
-          r.readAsDataURL(selectedFile);
-        });
+      let mime = selectedFile?.type || 'audio/wav';
+      let fileName = selectedFile?.name || 'media_source.wav';
+
+      if (selectedFile) {
+        // Extract lightweight 16kHz mono WAV audio (typically under 2-4MB) to prevent reverse proxy 413 / HTML errors
+        try {
+          const extracted = await extractAudioForWhisper(selectedFile);
+          b64 = extracted.base64;
+          mime = 'audio/wav';
+          fileName = selectedFile.name.replace(/\.[^/.]+$/, '') + '.wav';
+          if (extracted.duration > 0) {
+            setVideoDuration(extracted.duration);
+          }
+        } catch (extractErr) {
+          console.warn('[Audio Extraction Fallback]', extractErr);
+          if (!b64) {
+            b64 = await new Promise((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = () => resolve((r.result as string).split(',')[1]);
+              r.onerror = reject;
+              r.readAsDataURL(selectedFile);
+            });
+          }
+        }
       }
 
       const res = await fetch('/api/transcribe-media', {
@@ -149,8 +193,8 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fileBase64: b64,
-          fileName: selectedFile?.name || 'video.mp4',
-          mimeType: selectedFile?.type || 'video/mp4',
+          fileName,
+          mimeType: mime,
           aiModelConfig: {
             provider: aiProvider,
             modelName: aiModel,
@@ -160,20 +204,32 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const resText = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch (parseErr) {
+        if (res.status === 413 || resText.includes('413')) {
+          throw new Error('فایل ویدیو/صوت بسیار حجیم است. لطفاً بخش کوتاه‌تری انتخاب فرمایید.');
+        }
+        throw new Error(`Server returned unexpected response (${res.status}): ${resText.slice(0, 140)}`);
+      }
+
       if (!res.ok) throw new Error(data.error || 'Failed to transcribe audio');
 
       if (Array.isArray(data.segments) && data.segments.length > 0) {
         setCustomSegments(data.segments);
         setCustomTranscriptText(data.fullText || data.segments.map((s: any) => s.text).join(' '));
+        setSelectedPresetKey('custom');
         setTranscribeStatus({
           provider: data.provider,
           model: data.model,
           latencyMs: data.latencyMs,
           count: data.segments.length,
         });
+        setShowSrtPreview(true);
       } else {
-        throw new Error('No speech segments detected in file.');
+        throw new Error('هیچ جمله‌ای در صوت تشخیص داده نشد.');
       }
     } catch (err: any) {
       console.error('Transcription failed:', err);
@@ -181,6 +237,63 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
     } finally {
       setIsTranscribing(false);
     }
+  };
+
+  const handleTestGroqConnection = async () => {
+    if (!aiApiKey || !aiApiKey.trim()) {
+      setErrorMsg(locale === 'fa' ? 'لطفاً ابتدا کلید Groq API را وارد کنید.' : 'Please enter your Groq API key first.');
+      return;
+    }
+    setTestConnectionStatus({ testing: true });
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/ai/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'groq',
+          modelName: aiModel || 'llama-3.3-70b-versatile',
+          apiKey: aiApiKey.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Groq connection failed');
+      }
+      setTestConnectionStatus({
+        testing: false,
+        success: true,
+        msg: `اتصال برقرار شد (${data.latencyMs}ms) • مدل ${data.modelName}`,
+      });
+      saveAiConfig({ provider: 'groq', modelName: aiModel, apiKey: aiApiKey.trim() });
+    } catch (err: any) {
+      setTestConnectionStatus({
+        testing: false,
+        success: false,
+        msg: err.message || 'خطا در برقراری ارتباط با Groq',
+      });
+    }
+  };
+
+  const handleDownloadSrt = () => {
+    const srtContent = exportSegmentsToSrt(customSegments);
+    if (!srtContent) return;
+    const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${projectTitle.trim().replace(/[^a-zA-Z0-9_-]/g, '_') || 'subtitles'}.srt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCopySrt = () => {
+    const srtContent = exportSegmentsToSrt(customSegments);
+    if (!srtContent) return;
+    navigator.clipboard.writeText(srtContent).then(() => {
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 2000);
+    });
   };
 
   const handlePresetSelect = (key: 'fear_talk' | 'steve_jobs' | 'simon_sinek') => {
@@ -199,7 +312,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
 
   const handleGenerateCustomSpeech = async () => {
     if (!projectTitle.trim()) {
-      setErrorMsg('Please enter a project title first.');
+      setErrorMsg(locale === 'fa' ? 'لطفاً ابتدا عنوان پروژه را وارد کنید.' : 'Please enter a project title first.');
       return;
     }
     setIsGeneratingCustomSpeech(true);
@@ -210,14 +323,27 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: projectTitle,
-          duration: selectedFile ? 180 : 120,
+          duration: selectedFile ? Math.round(videoDuration) || 180 : 120,
+          aiModelConfig: {
+            provider: aiProvider,
+            modelName: aiModel,
+            baseUrl: (aiProvider === 'local_ollama' || aiProvider === 'custom_compatible') ? localBaseUrl : undefined,
+            apiKey: aiApiKey || undefined,
+          },
         }),
       });
-      const data = await res.json();
+      const resText = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch {
+        throw new Error(`Server error (${res.status}): ${resText.slice(0, 140)}`);
+      }
       if (!res.ok) throw new Error(data.error || 'Failed to generate transcript');
       if (Array.isArray(data.segments) && data.segments.length > 0) {
         setCustomSegments(data.segments);
         setCustomTranscriptText(data.fullText || data.segments.map((s: any) => s.text).join(' '));
+        setShowSrtPreview(true);
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Error generating speech text');
@@ -299,7 +425,14 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
         }),
       });
 
-      const data = await response.json();
+      const resText = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch (parseErr) {
+        throw new Error(`Server returned unexpected response (${response.status}): ${resText.slice(0, 140)}`);
+      }
+
       if (!response.ok) {
         throw new Error(data.error || 'Failed to create project');
       }
@@ -532,62 +665,131 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                     </div>
                   </div>
 
-                  {/* Transcribe with Groq Action */}
-                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/10 via-slate-900 to-slate-900 border border-amber-500/30 flex flex-col sm:flex-row items-center justify-between gap-3">
-                    <div className="space-y-0.5 text-left">
-                      <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
-                        <Zap className="w-3.5 h-3.5 text-amber-400" />
-                        <span>
-                          {locale === 'fa'
-                            ? 'استخراج و رونویسی گفتار با مدل هوش مصنوعی (Whisper)'
-                            : 'AI Speech Transcription (Groq Whisper / Gemini)'}
+                  {/* Groq API Key Inline Input (If Groq selected but key not configured yet) */}
+                  {aiProvider === 'groq' && !aiApiKey && (
+                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>{locale === 'fa' ? 'ورود کلید Groq API برای رونویسی فوق‌سریع' : 'Enter Groq API Key for Ultra-Fast Whisper'}</span>
                         </span>
-                      </span>
-                      <p className="text-[11px] text-slate-400">
-                        {locale === 'fa'
-                          ? 'استخراج فوری زمان‌بندی و جملات انگلیسی ویدیو جهت تولید خودکار آزمون و فلش‌کارت'
-                          : 'Extracts real timestamps & spoken sentences directly to build your vocabulary lessons.'}
-                      </p>
+                        <span className="text-[10px] text-amber-400 font-mono">starts with gsk_</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={aiApiKey}
+                          onChange={(e) => {
+                            setAiApiKey(e.target.value);
+                            saveAiConfig({ apiKey: e.target.value });
+                          }}
+                          placeholder="gsk_..."
+                          className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
                     </div>
+                  )}
 
-                    <button
-                      type="button"
-                      onClick={handleTranscribeWithAI}
-                      disabled={isTranscribing}
-                      className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap"
-                    >
-                      {isTranscribing ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>{locale === 'fa' ? 'در حال رونویسی هوشمند...' : 'Transcribing Speech...'}</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="w-3.5 h-3.5" />
+                  {/* Transcribe with Whisper Action */}
+                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/10 via-slate-900 to-slate-900 border border-amber-500/30 space-y-2">
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+                      <div className="space-y-0.5 text-left">
+                        <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-amber-400" />
                           <span>
                             {locale === 'fa'
-                              ? 'استخراج گفتار با هوش مصنوعی'
-                              : 'Transcribe with AI'}
+                              ? 'استخراج گفتار با مدل صوتی Whisper (Groq)'
+                              : 'Speech Transcription with Whisper (Groq)'}
                           </span>
-                        </>
-                      )}
-                    </button>
+                        </span>
+                        <p className="text-[11px] text-slate-400">
+                          {locale === 'fa'
+                            ? `تبدیل مستقیم گفتار ویدیو به زیرنویس و زمان‌بندی دقیق (مدل صوتی: whisper-large-v3 • مدل تحلیل متن: ${aiModel})`
+                            : `Converts video speech into precise timestamps & SRT subtitles (Audio: whisper-large-v3, LLM: ${aiModel})`}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleTranscribeWithAI}
+                        disabled={isTranscribing}
+                        className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap"
+                      >
+                        {isTranscribing ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>{locale === 'fa' ? 'در حال استخراج صوت و رونویسی...' : 'Extracting audio & transcribing...'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>
+                              {locale === 'fa'
+                                ? 'استخراج گفتار با هوش مصنوعی'
+                                : 'Transcribe with AI'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Transcribe Success Banner */}
-                  {transcribeStatus && (
-                    <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-300 animate-in fade-in">
-                      <div className="flex items-center gap-2">
-                        <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span>
-                          {locale === 'fa'
-                            ? `${transcribeStatus.count} جمله گفتاری با هوش مصنوعی استخراج شد (${transcribeStatus.latencyMs}ms)`
-                            : `Transcribed ${transcribeStatus.count} sentences with ${transcribeStatus.model} in ${transcribeStatus.latencyMs}ms`}
-                        </span>
+                  {/* Transcribe Success Banner & SRT Controls */}
+                  {customSegments.length > 0 && (
+                    <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3 animate-in fade-in">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-300">
+                        <div className="flex items-center gap-2">
+                          <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <span className="font-semibold">
+                            {locale === 'fa'
+                              ? `${customSegments.length} جمله گفتاری همراه با زمان‌بندی دقیق استخراج شد`
+                              : `${customSegments.length} spoken sentences with exact timestamps extracted`}
+                          </span>
+                        </div>
+                        {transcribeStatus && (
+                          <span className="font-mono text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/20 self-start sm:self-auto">
+                            {transcribeStatus.provider} • {transcribeStatus.latencyMs}ms
+                          </span>
+                        )}
                       </div>
-                      <span className="font-mono text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/20">
-                        {transcribeStatus.latencyMs}ms
-                      </span>
+
+                      {/* SRT Action Toolbar */}
+                      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-emerald-500/20">
+                        <button
+                          type="button"
+                          onClick={handleDownloadSrt}
+                          className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] rounded-lg flex items-center gap-1.5 transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>{locale === 'fa' ? 'دانلود فایل زیرنویس (.SRT)' : 'Download .SRT'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleCopySrt}
+                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium rounded-lg flex items-center gap-1.5 transition-colors"
+                        >
+                          {copyFeedback ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                          <span>{copyFeedback ? (locale === 'fa' ? 'کپی شد!' : 'Copied!') : (locale === 'fa' ? 'کپی متن SRT' : 'Copy SRT')}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowSrtPreview(!showSrtPreview)}
+                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-medium rounded-lg flex items-center gap-1.5 transition-colors"
+                        >
+                          <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>{showSrtPreview ? (locale === 'fa' ? 'بستن پیش‌نمایش SRT' : 'Hide SRT') : (locale === 'fa' ? 'مشاهده ساختار SRT' : 'View SRT Code')}</span>
+                          {showSrtPreview ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        </button>
+                      </div>
+
+                      {/* Expandable SRT Box */}
+                      {showSrtPreview && (
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-[10px] text-slate-300 max-h-48 overflow-y-auto whitespace-pre leading-relaxed select-all">
+                          {exportSegmentsToSrt(customSegments)}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -634,166 +836,215 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
               />
             </div>
 
-            {/* Custom Video Speech Transcript & Subtitles (Only when custom file/video selected) */}
-            {selectedPresetKey === 'custom' && (
-              <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-white flex items-center gap-2">
-                    <Subtitles className="w-4 h-4 text-cyan-400" />
+            {/* Custom Video Speech Transcript & Subtitles */}
+            <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-white flex items-center gap-2">
+                  <Subtitles className="w-4 h-4 text-cyan-400" />
+                  <span>
+                    {locale === 'fa'
+                      ? 'متن گفتار، زمان‌بندی و زیرنویس (SRT)'
+                      : 'Video Speech Transcript & Subtitles (.SRT)'}
+                  </span>
+                </label>
+                <span className="text-[10px] text-cyan-400 font-mono">
+                  {customSegments.length > 0
+                    ? `${customSegments.length} ${locale === 'fa' ? 'جمله آماده' : 'segments ready'}`
+                    : locale === 'fa' ? 'انتخابی / خودکار' : 'Optional / Auto'}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                {locale === 'fa'
+                  ? 'می‌توانید زیرنویس SRT را با هوش مصنوعی بر اساس عنوان ویدیو بسازید، فایل .srt آپلود کنید، یا متن گفتار را مستقیماً وارد و دانلود نمایید.'
+                  : 'Generate subtitles using AI matching your title, upload an .srt file, or paste your script to export and customize.'}
+              </p>
+
+              {/* Sub-tabs */}
+              <div className="flex gap-2 border-b border-slate-800 pb-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setTranscriptTab('ai')}
+                  className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                    transcriptTab === 'ai'
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                  }`}
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>{locale === 'fa' ? 'تولید هوشمند با مدل انتخاب‌شده' : 'Generate with AI'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTranscriptTab('paste')}
+                  className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                    transcriptTab === 'paste'
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                  }`}
+                >
+                  <FileText className="w-3 h-3" />
+                  <span>{locale === 'fa' ? 'چسباندن متن' : 'Paste Script'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTranscriptTab('upload')}
+                  className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+                    transcriptTab === 'upload'
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
+                  }`}
+                >
+                  <UploadCloud className="w-3 h-3" />
+                  <span>{locale === 'fa' ? 'آپلود زیرنویس (.srt)' : 'Upload Subtitles'}</span>
+                </button>
+              </div>
+
+              {/* TAB 1: AI */}
+              {transcriptTab === 'ai' && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 pb-1">
                     <span>
-                      {locale === 'fa'
-                        ? 'متن گفتار و زیرنویس این ویدیو'
-                        : 'Video Speech Transcript & Subtitles'}
+                      {locale === 'fa' ? 'مدل زبانی فعال:' : 'Active LLM Model:'}{' '}
+                      <strong className="text-amber-300 font-mono">
+                        {aiProvider === 'groq' ? `Groq (${aiModel})` : `${aiProvider} (${aiModel})`}
+                      </strong>
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleGenerateCustomSpeech}
+                    disabled={isGeneratingCustomSpeech}
+                    className="w-full py-2.5 px-3 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50 shadow-md shadow-cyan-500/20"
+                  >
+                    {isGeneratingCustomSpeech ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>{locale === 'fa' ? 'در حال تولید زیرنویس و گفتار با هوش مصنوعی...' : 'Generating speech & SRT with AI...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>
+                          {locale === 'fa'
+                            ? `تولید هوشمند زیرنویس (SRT) متناسب با «${projectTitle.slice(0, 30)}...»`
+                            : 'Generate Speech Transcript & Subtitles from Title'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+
+              {/* TAB 2: PASTE */}
+              {transcriptTab === 'paste' && (
+                <div className="space-y-2 pt-1">
+                  <textarea
+                    value={customTranscriptText}
+                    onChange={(e) => setCustomTranscriptText(e.target.value)}
+                    placeholder="Paste English speech lines here..."
+                    rows={3}
+                    className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleParseCustomText}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold"
+                  >
+                    {locale === 'fa' ? 'تفکیک جملات' : 'Parse Sentences'}
+                  </button>
+                </div>
+              )}
+
+              {/* TAB 3: UPLOAD SUBTITLE */}
+              {transcriptTab === 'upload' && (
+                <div className="pt-1">
+                  <label className="border border-dashed border-slate-700 hover:border-cyan-500/60 rounded-lg p-3 flex items-center justify-center gap-2 cursor-pointer bg-slate-900/40 hover:bg-slate-900 transition-colors">
+                    <input
+                      type="file"
+                      accept=".srt,.vtt,.txt"
+                      onChange={handleCustomSubtitleUpload}
+                      className="sr-only"
+                    />
+                    <UploadCloud className="w-4 h-4 text-cyan-400" />
+                    <span className="text-xs text-slate-300">
+                      {locale === 'fa' ? 'انتخاب فایل SRT یا VTT' : 'Select .srt or .vtt subtitle file'}
                     </span>
                   </label>
-                  <span className="text-[10px] text-cyan-400 font-mono">
-                    {customSegments.length > 0
-                      ? `${customSegments.length} ${locale === 'fa' ? 'جمله آماده' : 'segments ready'}`
-                      : locale === 'fa' ? 'انتخابی / خودکار' : 'Optional / Auto'}
-                  </span>
                 </div>
+              )}
 
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  {locale === 'fa'
-                    ? 'برای جلوگیری از متن تکراری پیش‌فرض، می‌توانید متن گفتار اختصاصی ویدیوی خود را وارد کنید، فایل زیرنویس آپلود نمایید، یا با هوش مصنوعی متن گفتار متناسب با عنوان بسازید.'
-                    : 'Provide your own video script, upload a subtitle file (.srt), or let AI generate authentic speech tailored to your video title.'}
-                </p>
-
-                {/* Sub-tabs */}
-                <div className="flex gap-2 border-b border-slate-800 pb-2 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => setTranscriptTab('ai')}
-                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
-                      transcriptTab === 'ai'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
-                    }`}
-                  >
-                    <Sparkles className="w-3 h-3" />
-                    <span>{locale === 'fa' ? 'تولید هوشمند با هوش مصنوعی' : 'AI Speech Generator'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setTranscriptTab('paste')}
-                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
-                      transcriptTab === 'paste'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
-                    }`}
-                  >
-                    <FileText className="w-3 h-3" />
-                    <span>{locale === 'fa' ? 'چسباندن متن' : 'Paste Script'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setTranscriptTab('upload')}
-                    className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
-                      transcriptTab === 'upload'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                        : 'text-slate-400 hover:text-slate-200 bg-slate-900/50'
-                    }`}
-                  >
-                    <UploadCloud className="w-3 h-3" />
-                    <span>{locale === 'fa' ? 'آپلود زیرنویس (.srt)' : 'Upload Subtitles'}</span>
-                  </button>
-                </div>
-
-                {/* TAB 1: AI */}
-                {transcriptTab === 'ai' && (
-                  <div className="space-y-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={handleGenerateCustomSpeech}
-                      disabled={isGeneratingCustomSpeech}
-                      className="w-full py-2 px-3 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-                    >
-                      {isGeneratingCustomSpeech ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>{locale === 'fa' ? 'در حال ایجاد گفتار اختصاصی...' : 'Generating speech...'}</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>
-                            {locale === 'fa'
-                              ? 'ایجاد متن گفتار متناسب با عنوان ویدیو'
-                              : 'Generate Speech Transcript from Title'}
-                          </span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                )}
-
-                {/* TAB 2: PASTE */}
-                {transcriptTab === 'paste' && (
-                  <div className="space-y-2 pt-1">
-                    <textarea
-                      value={customTranscriptText}
-                      onChange={(e) => setCustomTranscriptText(e.target.value)}
-                      placeholder="Paste English speech lines here..."
-                      rows={3}
-                      className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleParseCustomText}
-                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold"
-                    >
-                      {locale === 'fa' ? 'تفکیک جملات' : 'Parse Sentences'}
-                    </button>
-                  </div>
-                )}
-
-                {/* TAB 3: UPLOAD SUBTITLE */}
-                {transcriptTab === 'upload' && (
-                  <div className="pt-1">
-                    <label className="border border-dashed border-slate-700 hover:border-cyan-500/60 rounded-lg p-3 flex items-center justify-center gap-2 cursor-pointer bg-slate-900/40 hover:bg-slate-900 transition-colors">
-                      <input
-                        type="file"
-                        accept=".srt,.vtt,.txt"
-                        onChange={handleCustomSubtitleUpload}
-                        className="sr-only"
-                      />
-                      <UploadCloud className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs text-slate-300">
-                        {locale === 'fa' ? 'انتخاب فایل SRT یا VTT' : 'Select .srt or .vtt subtitle file'}
-                      </span>
-                    </label>
-                  </div>
-                )}
-
-                {/* Segments Preview */}
-                {customSegments.length > 0 && (
-                  <div className="p-2.5 rounded-lg bg-slate-900/90 border border-cyan-500/20 text-xs space-y-1.5">
-                    <div className="flex items-center gap-1.5 text-emerald-400 font-semibold text-[11px]">
+              {/* Segments & SRT Actions Preview */}
+              {customSegments.length > 0 && (
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-cyan-500/30 text-xs space-y-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-emerald-400 font-semibold text-[11px]">
+                    <div className="flex items-center gap-1.5">
                       <Check className="w-3.5 h-3.5" />
                       <span>
                         {locale === 'fa'
-                          ? `${customSegments.length} جمله گفتاری برای آموزش تفکیک شد:`
-                          : `${customSegments.length} authentic spoken sentences parsed:`}
+                          ? `${customSegments.length} جمله گفتاری برای آموزش و تولید ویدیو آماده است:`
+                          : `${customSegments.length} authentic spoken sentences ready:`}
                       </span>
                     </div>
-                    <div className="max-h-24 overflow-y-auto space-y-1 pr-1">
-                      {customSegments.slice(0, 4).map((s, idx) => (
-                        <div key={idx} className="text-[11px] text-slate-300 truncate bg-slate-950 p-1.5 rounded border border-slate-800">
-                          {s.text}
-                        </div>
-                      ))}
-                      {customSegments.length > 4 && (
-                        <span className="text-[10px] text-slate-500">
-                          +{customSegments.length - 4} more sentences
-                        </span>
-                      )}
+
+                    {/* Toolbar */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleDownloadSrt}
+                        className="px-2.5 py-1 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-[10px] rounded flex items-center gap-1 transition-colors"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>{locale === 'fa' ? 'دانلود .SRT' : 'Download .SRT'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCopySrt}
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] rounded flex items-center gap-1 transition-colors"
+                      >
+                        {copyFeedback ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                        <span>{copyFeedback ? (locale === 'fa' ? 'کپی شد!' : 'Copied!') : (locale === 'fa' ? 'کپی SRT' : 'Copy SRT')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowSrtPreview(!showSrtPreview)}
+                        className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] rounded flex items-center gap-1 transition-colors"
+                      >
+                        <FileCode className="w-3 h-3 text-cyan-400" />
+                        <span>{showSrtPreview ? (locale === 'fa' ? 'بستن کد' : 'Hide') : (locale === 'fa' ? 'کد SRT' : 'View')}</span>
+                      </button>
                     </div>
                   </div>
-                )}
-              </div>
-            )}
+
+                  {/* List preview */}
+                  <div className="max-h-24 overflow-y-auto space-y-1 pr-1">
+                    {customSegments.slice(0, 4).map((s, idx) => (
+                      <div key={idx} className="text-[11px] text-slate-300 truncate bg-slate-950 p-1.5 rounded border border-slate-800 flex items-center justify-between gap-2">
+                        <span className="truncate">{s.text}</span>
+                        <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                          {s.start.toFixed(1)}s - {s.end.toFixed(1)}s
+                        </span>
+                      </div>
+                    ))}
+                    {customSegments.length > 4 && (
+                      <span className="text-[10px] text-slate-500 block">
+                        +{customSegments.length - 4} {locale === 'fa' ? 'جمله دیگر در فایل ذخیره شد' : 'more sentences included'}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Expandable SRT Raw viewer */}
+                  {showSrtPreview && (
+                    <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-[10px] text-cyan-300 max-h-40 overflow-y-auto whitespace-pre leading-relaxed select-all">
+                      {exportSegmentsToSrt(customSegments)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Learner Level & Segments Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1016,42 +1267,113 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
               )}
 
               {aiProvider === 'groq' && (
-                <div className="pt-2 space-y-2 text-xs border-t border-slate-800/80">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="pt-2 space-y-3 text-xs border-t border-slate-800/80">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">Groq Model Name (LLM):</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] text-slate-300 font-semibold">Groq Model Name (LLM):</label>
+                        <span className="text-[10px] text-amber-400 font-mono">LPU Inference</span>
+                      </div>
                       <input
                         type="text"
                         value={aiModel}
-                        onChange={(e) => setAiModel(e.target.value)}
-                        placeholder="llama-3.3-70b-versatile or llama-3.1-8b-instant"
-                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
+                        onChange={(e) => {
+                          setAiModel(e.target.value);
+                          saveAiConfig({ modelName: e.target.value });
+                        }}
+                        placeholder="llama-3.3-70b-versatile"
+                        className="w-full px-2.5 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
                       />
+                      {/* Model presets */}
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'].map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => {
+                              setAiModel(m);
+                              saveAiConfig({ modelName: m });
+                            }}
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                              aiModel === m
+                                ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
+                                : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                            }`}
+                          >
+                            {m.split('-')[0]}-{m.split('-')[1]}
+                          </button>
+                        ))}
+                      </div>
                     </div>
+
                     <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">Groq API Key:</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] text-slate-300 font-semibold">Groq API Key:</label>
+                        <span className="text-[10px] text-slate-500 font-mono">gsk_...</span>
+                      </div>
                       <input
                         type="password"
                         value={aiApiKey}
-                        onChange={(e) => setAiApiKey(e.target.value)}
+                        onChange={(e) => {
+                          setAiApiKey(e.target.value);
+                          saveAiConfig({ apiKey: e.target.value });
+                        }}
                         placeholder="gsk_..."
-                        className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
+                        className="w-full px-2.5 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500"
                       />
+                      <div className="flex items-center justify-between mt-1.5">
+                        <button
+                          type="button"
+                          onClick={handleTestGroqConnection}
+                          disabled={testConnectionStatus.testing || !aiApiKey}
+                          className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 text-amber-300 border border-amber-500/40 rounded text-[11px] font-semibold flex items-center gap-1.5 transition-colors"
+                        >
+                          {testConnectionStatus.testing ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Zap className="w-3 h-3" />
+                          )}
+                          <span>{locale === 'fa' ? 'تست اتصال به Groq' : 'Test Groq Connection'}</span>
+                        </button>
+
+                        {aiApiKey && (
+                          <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-semibold">
+                            <Check className="w-3 h-3" /> Key Saved
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-amber-300/80">
+
+                  {/* Connection Test Result Feedback */}
+                  {testConnectionStatus.msg && (
+                    <div
+                      className={`p-2 rounded-lg text-[11px] flex items-center gap-2 ${
+                        testConnectionStatus.success
+                          ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-red-500/10 text-red-300 border border-red-500/30'
+                      }`}
+                    >
+                      {testConnectionStatus.success ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      ) : (
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                      )}
+                      <span>{testConnectionStatus.msg}</span>
+                    </div>
+                  )}
+
+                  <div className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 text-[11px] text-slate-400 leading-relaxed">
+                    <p>
                       {locale === 'fa'
-                        ? 'پردازش با تراشه‌های LPU فوق‌سریع Groq و مدل Whisper برای رونویسی و تحلیل'
-                        : 'Ultra-fast Groq LPU inference for linguistic extraction & Whisper'}
-                    </span>
-                    {aiApiKey ? (
-                      <span className="text-emerald-400 flex items-center gap-1 font-semibold">
-                        <Check className="w-3 h-3" /> Key Ready
-                      </span>
-                    ) : (
-                      <span className="text-amber-400">Groq API key required (starts with gsk_)</span>
-                    )}
+                        ? '• صوت و ویدیو با مدل Whisper (whisper-large-v3) به جملات و زیرنویس زمان‌بندی‌شده تبدیل می‌شود.'
+                        : '• Speech is transcribed into timestamps using Groq Whisper (whisper-large-v3).'}
+                    </p>
+                    <p>
+                      {locale === 'fa'
+                        ? `• آزمون‌ها، معادل‌های فارسی و نکات لغوی با مدل «${aiModel}» به صورت بلادرنگ و فوق‌سریع تولید خواهند شد.`
+                        : `• Vocabulary, quiz questions, and Persian explanations are generated with ${aiModel}.`}
+                    </p>
                   </div>
                 </div>
               )}

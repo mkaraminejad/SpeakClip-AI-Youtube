@@ -14,8 +14,8 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Initialize in-memory project store seeded with diverse iconic speeches
 const projectsStore: Map<string, Project> = new Map();
@@ -302,14 +302,16 @@ app.post('/api/transcribe-media', async (req, res) => {
 
   try {
     const buffer = Buffer.from(fileBase64, 'base64');
-    const groqKey = config.apiKey || getActiveServerConfig().apiKey || process.env.GROQ_API_KEY;
+    const activeCfg = getActiveServerConfig();
+    const rawApiKey = (config.apiKey && config.apiKey !== 'abcd') ? config.apiKey : (activeCfg.apiKey !== 'abcd' ? activeCfg.apiKey : '');
+    const groqKey = (rawApiKey && rawApiKey.startsWith('gsk_')) ? rawApiKey : process.env.GROQ_API_KEY;
 
     // If Groq is the provider, or Groq API key is present
     if ((config.provider === 'groq' || groqKey?.startsWith('gsk_')) && groqKey) {
-      console.log(`[Groq Whisper] Transcribing ${fileName || 'video/audio'} with whisper-large-v3...`);
+      console.log(`[Groq Whisper] Transcribing ${fileName || 'video/audio'} (${(buffer.length / 1024 / 1024).toFixed(2)} MB) with whisper-large-v3...`);
       const whisperResult = await transcribeAudioWithGroqWhisper({
         buffer,
-        filename: fileName || 'video_clip.mp4',
+        filename: fileName || 'video_clip.wav',
         apiKey: groqKey,
       });
 
@@ -328,7 +330,7 @@ app.post('/api/transcribe-media', async (req, res) => {
     }
 
     // Fallback: Gemini multimodal transcription if Gemini key is available
-    const geminiKey = config.apiKey || getActiveServerConfig().apiKey || process.env.GEMINI_API_KEY;
+    const geminiKey = (rawApiKey && !rawApiKey.startsWith('gsk_') && rawApiKey.length > 15) ? rawApiKey : process.env.GEMINI_API_KEY;
     if (geminiKey) {
       console.log(`[Gemini] Transcribing audio with gemini-2.5-flash...`);
       const ai = new GoogleGenAI({
@@ -454,141 +456,146 @@ app.get('/api/projects', (req, res) => {
 
 // POST /api/projects
 app.post('/api/projects', async (req, res) => {
-  const {
-    title,
-    description,
-    nativeLanguage = 'fa',
-    learnerLevel = 'B2',
-    outputFormat = '16:9',
-    numSegments = 5,
-    tone = 'friendly',
-    legalConfirmed = false,
-    mediaFileName,
-    mediaDuration = 120,
-    mediaUrl,
-    sampleKey,
-    customTranscript,
-    transcriptSegments,
-    aiModelConfig,
-  } = req.body;
+  try {
+    const {
+      title,
+      description,
+      nativeLanguage = 'fa',
+      learnerLevel = 'B2',
+      outputFormat = '16:9',
+      numSegments = 5,
+      tone = 'friendly',
+      legalConfirmed = false,
+      mediaFileName,
+      mediaDuration = 120,
+      mediaUrl,
+      sampleKey,
+      customTranscript,
+      transcriptSegments,
+      aiModelConfig,
+    } = req.body;
 
-  if (!title) {
-    res.status(400).json({ error: 'Project title is required.' });
-    return;
+    if (!title) {
+      res.status(400).json({ error: 'Project title is required.' });
+      return;
+    }
+
+    if (!legalConfirmed) {
+      res.status(400).json({
+        error: 'Legal confirmation is required: you must confirm permission to use/process the content.',
+      });
+      return;
+    }
+
+    const id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const activeCfg = getActiveServerConfig();
+    const effectiveAIConfig: AIModelConfig = {
+      provider: aiModelConfig?.provider || activeCfg.provider,
+      modelName: aiModelConfig?.modelName || activeCfg.modelName,
+      baseUrl: aiModelConfig?.baseUrl || activeCfg.baseUrl,
+      apiKey: aiModelConfig?.apiKey || activeCfg.apiKey,
+      temperature: aiModelConfig?.temperature ?? activeCfg.temperature,
+    };
+
+    // Default new project structure
+    const newProject: Project = {
+      id,
+      title,
+      description: description || 'Educational English clip created with SpeakClip AI',
+      status: 'uploaded',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      nativeLanguage,
+      learnerLevel,
+      outputFormat,
+      numSegments: Number(numSegments) || 5,
+      tone,
+      legalConfirmed: true,
+      mediaUrl: mediaUrl || undefined,
+      mediaFileName: mediaFileName || 'speech_source_audio.mp4',
+      mediaDuration: Number(mediaDuration) || 120,
+      mediaType: 'video',
+      brandProfile: {
+        channelName: 'SpeakClip AI English',
+        channelTagline: 'Master Real Spoken English',
+        primaryColor: '#0f172a',
+        accentColor: '#06b6d4',
+        highlightColor: '#facc15',
+        fontFamilyEn: 'Plus Jakarta Sans',
+        fontFamilyFa: 'Vazirmatn',
+        introTitle: 'Learn English from Real Speech',
+        outroCtaTextEn: 'Subscribe for more authentic speech lessons',
+        outroCtaTextFa: 'برای یادگیری بیشتر عضو کانال شوید',
+        showWatermark: true,
+      },
+      renderConfig: {
+        resolution: '1080p',
+        fps: 30,
+        aspectRatio: outputFormat === '9:16' ? '9:16' : '16:9',
+        showOriginalVideo: true,
+        persianVoiceId: 'fa-IR-FaridNeural',
+        exportFormat: 'mp4',
+      },
+      transcript: {
+        language: 'en',
+        duration: Number(mediaDuration) || 120,
+        fullText: '',
+        segments: [],
+      },
+      lessonItems: [],
+      scenes: [],
+      aiModelConfig: effectiveAIConfig,
+      currentRenderingProgress: 0,
+    };
+
+    // Case 1: Preset sample speech chosen
+    if (sampleKey && sampleKey !== 'custom') {
+      const preset = getPresetProject(sampleKey);
+      if (preset) {
+        newProject.transcript = JSON.parse(JSON.stringify(preset.transcript));
+        newProject.lessonItems = JSON.parse(JSON.stringify(preset.lessonItems));
+        newProject.scenes = JSON.parse(JSON.stringify(preset.scenes));
+        newProject.status = 'ready';
+        newProject.currentRenderingProgress = 100;
+      }
+    } else {
+      // Case 2: User provided explicit segments (e.g. from subtitle upload or wizard preview)
+      if (Array.isArray(transcriptSegments) && transcriptSegments.length > 0) {
+        newProject.transcript.segments = transcriptSegments;
+        newProject.transcript.fullText = transcriptSegments.map((s: any) => s.text).join(' ');
+        newProject.lessonItems = await generateAILessonItems(transcriptSegments, newProject);
+        newProject.scenes = generateScenesForProject(newProject);
+        newProject.status = 'ready';
+        newProject.currentRenderingProgress = 100;
+      }
+      // Case 3: User pasted custom transcript text or SRT/VTT
+      else if (customTranscript && typeof customTranscript === 'string' && customTranscript.trim().length > 0) {
+        const parsedSegments = parseAnyTranscriptInput(customTranscript, newProject.mediaDuration);
+        newProject.transcript.segments = parsedSegments;
+        newProject.transcript.fullText = parsedSegments.map((s) => s.text).join(' ');
+        newProject.lessonItems = await generateAILessonItems(parsedSegments, newProject);
+        newProject.scenes = generateScenesForProject(newProject);
+        newProject.status = 'ready';
+        newProject.currentRenderingProgress = 100;
+      }
+      // Case 4: Custom video uploaded without transcript -> dynamically generate speech matching THIS video title!
+      else {
+        const generatedSegments = await generateSegmentsForTitle(title, newProject, newProject.mediaDuration);
+        newProject.transcript.segments = generatedSegments;
+        newProject.transcript.fullText = generatedSegments.map((s) => s.text).join(' ');
+        newProject.lessonItems = await generateAILessonItems(generatedSegments, newProject);
+        newProject.scenes = generateScenesForProject(newProject);
+        newProject.status = 'ready';
+        newProject.currentRenderingProgress = 100;
+      }
+    }
+
+    projectsStore.set(id, newProject);
+    res.status(201).json({ project: newProject });
+  } catch (err: any) {
+    console.error('Error creating project:', err);
+    res.status(500).json({ error: err.message || 'Failed to create project' });
   }
-
-  if (!legalConfirmed) {
-    res.status(400).json({
-      error: 'Legal confirmation is required: you must confirm permission to use/process the content.',
-    });
-    return;
-  }
-
-  const id = `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  const activeCfg = getActiveServerConfig();
-  const effectiveAIConfig: AIModelConfig = {
-    provider: aiModelConfig?.provider || activeCfg.provider,
-    modelName: aiModelConfig?.modelName || activeCfg.modelName,
-    baseUrl: aiModelConfig?.baseUrl || activeCfg.baseUrl,
-    apiKey: aiModelConfig?.apiKey || activeCfg.apiKey,
-    temperature: aiModelConfig?.temperature ?? activeCfg.temperature,
-  };
-
-  // Default new project structure
-  const newProject: Project = {
-    id,
-    title,
-    description: description || 'Educational English clip created with SpeakClip AI',
-    status: 'uploaded',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    nativeLanguage,
-    learnerLevel,
-    outputFormat,
-    numSegments: Number(numSegments) || 5,
-    tone,
-    legalConfirmed: true,
-    mediaUrl: mediaUrl || undefined,
-    mediaFileName: mediaFileName || 'speech_source_audio.mp4',
-    mediaDuration: Number(mediaDuration) || 120,
-    mediaType: 'video',
-    brandProfile: {
-      channelName: 'SpeakClip AI English',
-      channelTagline: 'Master Real Spoken English',
-      primaryColor: '#0f172a',
-      accentColor: '#06b6d4',
-      highlightColor: '#facc15',
-      fontFamilyEn: 'Plus Jakarta Sans',
-      fontFamilyFa: 'Vazirmatn',
-      introTitle: 'Learn English from Real Speech',
-      outroCtaTextEn: 'Subscribe for more authentic speech lessons',
-      outroCtaTextFa: 'برای یادگیری بیشتر عضو کانال شوید',
-      showWatermark: true,
-    },
-    renderConfig: {
-      resolution: '1080p',
-      fps: 30,
-      aspectRatio: outputFormat === '9:16' ? '9:16' : '16:9',
-      showOriginalVideo: true,
-      persianVoiceId: 'fa-IR-FaridNeural',
-      exportFormat: 'mp4',
-    },
-    transcript: {
-      language: 'en',
-      duration: Number(mediaDuration) || 120,
-      fullText: '',
-      segments: [],
-    },
-    lessonItems: [],
-    scenes: [],
-    aiModelConfig: effectiveAIConfig,
-    currentRenderingProgress: 0,
-  };
-
-  // Case 1: Preset sample speech chosen
-  if (sampleKey && sampleKey !== 'custom') {
-    const preset = getPresetProject(sampleKey);
-    if (preset) {
-      newProject.transcript = JSON.parse(JSON.stringify(preset.transcript));
-      newProject.lessonItems = JSON.parse(JSON.stringify(preset.lessonItems));
-      newProject.scenes = JSON.parse(JSON.stringify(preset.scenes));
-      newProject.status = 'ready';
-      newProject.currentRenderingProgress = 100;
-    }
-  } else {
-    // Case 2: User provided explicit segments (e.g. from subtitle upload or wizard preview)
-    if (Array.isArray(transcriptSegments) && transcriptSegments.length > 0) {
-      newProject.transcript.segments = transcriptSegments;
-      newProject.transcript.fullText = transcriptSegments.map((s: any) => s.text).join(' ');
-      newProject.lessonItems = await generateAILessonItems(transcriptSegments, newProject);
-      newProject.scenes = generateScenesForProject(newProject);
-      newProject.status = 'ready';
-      newProject.currentRenderingProgress = 100;
-    }
-    // Case 3: User pasted custom transcript text or SRT/VTT
-    else if (customTranscript && typeof customTranscript === 'string' && customTranscript.trim().length > 0) {
-      const parsedSegments = parseAnyTranscriptInput(customTranscript, newProject.mediaDuration);
-      newProject.transcript.segments = parsedSegments;
-      newProject.transcript.fullText = parsedSegments.map((s) => s.text).join(' ');
-      newProject.lessonItems = await generateAILessonItems(parsedSegments, newProject);
-      newProject.scenes = generateScenesForProject(newProject);
-      newProject.status = 'ready';
-      newProject.currentRenderingProgress = 100;
-    }
-    // Case 4: Custom video uploaded without transcript -> dynamically generate speech matching THIS video title!
-    else {
-      const generatedSegments = await generateSegmentsForTitle(title, newProject, newProject.mediaDuration);
-      newProject.transcript.segments = generatedSegments;
-      newProject.transcript.fullText = generatedSegments.map((s) => s.text).join(' ');
-      newProject.lessonItems = await generateAILessonItems(generatedSegments, newProject);
-      newProject.scenes = generateScenesForProject(newProject);
-      newProject.status = 'ready';
-      newProject.currentRenderingProgress = 100;
-    }
-  }
-
-  projectsStore.set(id, newProject);
-  res.status(201).json({ project: newProject });
 });
 
 // GET /api/projects/:id

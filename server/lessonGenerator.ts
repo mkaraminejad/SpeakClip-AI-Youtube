@@ -246,7 +246,7 @@ Return a JSON object with key "items" containing the array of analyzed lesson it
           start_time: resItem.start_time ?? seg.start,
           end_time: resItem.end_time ?? seg.end,
           clean_transcript: resItem.clean_transcript || resItem.original_sentence || seg.text,
-          Persian_translation: resItem.Persian_translation || `ترجمه: ${seg.text}`,
+          Persian_translation: resItem.Persian_translation || resItem.persian_translation || resItem.translation_fa || resItem.translation || `ترجمه: ${seg.text}`,
           CEFR_level: (resItem.CEFR_level as any) || project.learnerLevel || 'B2',
           key_vocabulary: (resItem.key_vocabulary || []).map((v: any, vIdx: number) => ({
             id: `vocab_${idx}_${vIdx}`,
