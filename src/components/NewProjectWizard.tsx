@@ -62,8 +62,8 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
   const [outputFormat, setOutputFormat] = useState<VideoFormat>('16:9');
   const [numSegments, setNumSegments] = useState<number>(5);
   const [tone, setTone] = useState<TeachingTone>('friendly');
-  const [aiProvider, setAiProvider] = useState<AIProviderType>('gemini');
-  const [aiModel, setAiModel] = useState<string>('gemini-2.5-flash');
+  const [aiProvider, setAiProvider] = useState<AIProviderType>('groq');
+  const [aiModel, setAiModel] = useState<string>('llama-3.3-70b-versatile');
   const [aiApiKey, setAiApiKey] = useState<string>('');
   const [localBaseUrl, setLocalBaseUrl] = useState<string>('http://localhost:11434/v1');
   const [legalConfirmed, setLegalConfirmed] = useState<boolean>(true);
@@ -97,7 +97,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
     } catch (_) {}
   };
 
-  // Load configured AI settings from localStorage or server
+  // Load configured AI settings - strictly defaulting to Groq
   useEffect(() => {
     let savedConfig: AIModelConfig | null = null;
     try {
@@ -105,18 +105,27 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
       if (raw) savedConfig = JSON.parse(raw);
     } catch (_) {}
 
-    if (savedConfig) {
-      setAiProvider(savedConfig.provider || 'gemini');
-      setAiModel(savedConfig.modelName || 'gemini-2.5-flash');
+    if (savedConfig && savedConfig.provider && savedConfig.provider !== 'gemini') {
+      setAiProvider(savedConfig.provider);
+      setAiModel(savedConfig.modelName || 'llama-3.3-70b-versatile');
       if (savedConfig.baseUrl) setLocalBaseUrl(savedConfig.baseUrl);
       if (savedConfig.apiKey) setAiApiKey(savedConfig.apiKey);
     } else {
+      // Default strictly to Groq
+      setAiProvider('groq');
+      setAiModel('llama-3.3-70b-versatile');
+      saveAiConfig({ provider: 'groq', modelName: 'llama-3.3-70b-versatile' });
       fetch('/api/ai/config')
         .then((r) => r.json())
         .then((data) => {
           if (data.current) {
-            setAiProvider(data.current.provider || 'gemini');
-            setAiModel(data.current.modelName || 'gemini-2.5-flash');
+            if (data.current.provider && data.current.provider !== 'gemini') {
+              setAiProvider(data.current.provider);
+              setAiModel(data.current.modelName || 'llama-3.3-70b-versatile');
+            } else {
+              setAiProvider('groq');
+              setAiModel('llama-3.3-70b-versatile');
+            }
             if (data.current.baseUrl) setLocalBaseUrl(data.current.baseUrl);
             if (data.current.apiKey) setAiApiKey(data.current.apiKey);
           }
@@ -157,6 +166,16 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
       setErrorMsg(locale === 'fa' ? 'لطفاً ابتدا فایل ویدیو یا صوت را انتخاب کنید.' : 'Please select a video or audio file first.');
       return;
     }
+
+    if (aiProvider === 'groq' && (!aiApiKey || !aiApiKey.trim())) {
+      setErrorMsg(
+        locale === 'fa'
+          ? 'لطفاً ابتدا کلید Groq API خود را در کادر زیر وارد کنید (با gsk_ شروع می‌شود). استخراج صوتی مستقیماً توسط پردازنده‌های Groq با مدل Whisper انجام می‌پذیرد.'
+          : 'Please enter your Groq API key below (starts with gsk_) to transcribe speech with Groq Whisper.'
+      );
+      return;
+    }
+
     setIsTranscribing(true);
     setErrorMsg(null);
 
@@ -665,17 +684,19 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                     </div>
                   </div>
 
-                  {/* Groq API Key Inline Input (If Groq selected but key not configured yet) */}
-                  {aiProvider === 'groq' && !aiApiKey && (
-                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                  {/* Groq API Key Inline Input & Test (Step 1) */}
+                  {aiProvider === 'groq' && (
+                    <div className="p-3 rounded-xl bg-slate-950/80 border border-amber-500/30 space-y-2">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-semibold text-amber-300 flex items-center gap-1.5">
-                          <Zap className="w-3.5 h-3.5" />
-                          <span>{locale === 'fa' ? 'ورود کلید Groq API برای رونویسی فوق‌سریع' : 'Enter Groq API Key for Ultra-Fast Whisper'}</span>
+                          <Zap className="w-3.5 h-3.5 text-amber-400" />
+                          <span>{locale === 'fa' ? 'تنظیمات کلید هوش مصنوعی Groq (Whisper + Llama 3.3)' : 'Groq API Key (Whisper + Llama 3.3)'}</span>
                         </span>
-                        <span className="text-[10px] text-amber-400 font-mono">starts with gsk_</span>
+                        <span className="text-[10px] text-amber-400/80 font-mono">
+                          {aiApiKey ? (locale === 'fa' ? '✓ کلید تنظیم شد' : '✓ Key configured') : 'starts with gsk_'}
+                        </span>
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <input
                           type="password"
                           value={aiApiKey}
@@ -686,7 +707,25 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                           placeholder="gsk_..."
                           className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
                         />
+                        <button
+                          type="button"
+                          onClick={handleTestGroqConnection}
+                          disabled={testConnectionStatus.testing || !aiApiKey}
+                          className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-300 border border-amber-500/40 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+                        >
+                          {testConnectionStatus.testing ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Zap className="w-3 h-3" />
+                          )}
+                          <span>{locale === 'fa' ? 'تست اتصال' : 'Test Key'}</span>
+                        </button>
                       </div>
+                      {testConnectionStatus.msg && (
+                        <p className={`text-[11px] font-medium flex items-center gap-1 ${testConnectionStatus.success ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          <span>{testConnectionStatus.msg}</span>
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -1141,8 +1180,30 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    setAiProvider('groq');
+                    setAiModel('llama-3.3-70b-versatile');
+                  }}
+                  className={`p-2.5 rounded-lg border text-left transition-all ${
+                    aiProvider === 'groq'
+                      ? 'border-amber-500 bg-amber-950/30 text-amber-200 ring-1 ring-amber-500'
+                      : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-bold text-xs">
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Groq</span>
+                    </div>
+                    <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-sans">پیش‌فرض</span>
+                  </div>
+                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">Llama 3.3 (LPU)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
                     setAiProvider('gemini');
-                    setAiModel('gemini-2.5-flash');
+                    setAiModel('gemini-3.6-flash');
                   }}
                   className={`p-2.5 rounded-lg border text-left transition-all ${
                     aiProvider === 'gemini'
@@ -1154,26 +1215,7 @@ export const NewProjectWizard: React.FC<NewProjectWizardProps> = ({
                     <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
                     <span>Gemini</span>
                   </div>
-                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">2.5 Flash</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAiProvider('groq');
-                    setAiModel('llama-3.3-70b-versatile');
-                  }}
-                  className={`p-2.5 rounded-lg border text-left transition-all ${
-                    aiProvider === 'groq'
-                      ? 'border-amber-500 bg-amber-950/30 text-amber-200 ring-1 ring-amber-500'
-                      : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-bold text-xs">
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Groq</span>
-                  </div>
-                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">Llama 3.3 (LPU)</span>
+                  <span className="text-[10px] opacity-75 block mt-0.5 font-mono">3.6 Flash</span>
                 </button>
 
                 <button

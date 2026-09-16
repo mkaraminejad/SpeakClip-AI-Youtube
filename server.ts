@@ -207,26 +207,26 @@ app.get('/api/ai/config', (req, res) => {
     current: currentConfig,
     availableProviders: [
       {
-        id: 'gemini',
-        name: 'Google Gemini',
-        description: 'Native multimodal AI, fast structured JSON, high Persian fluency',
-        models: [
-          { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Recommended - Fastest)', default: true },
-          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Deep Reasoning & Nuanced Idioms)' },
-        ],
-        isConfigured: !!(process.env.GEMINI_API_KEY || (currentConfig.provider === 'gemini' && currentConfig.apiKey)),
-      },
-      {
         id: 'groq',
         name: 'Groq Cloud (Ultra-Fast LPU)',
-        description: 'Sub-second inference at ~500 tokens/sec via LPU hardware',
+        description: 'Sub-second inference at ~500 tokens/sec via LPU hardware & free Whisper transcription',
         defaultBaseUrl: 'https://api.groq.com/openai/v1',
         models: [
-          { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile (Recommended)' },
+          { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile (Recommended)', default: true },
           { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant (Ultra-fast)' },
           { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B (MoE 32k context)' },
         ],
         isConfigured: !!(process.env.GROQ_API_KEY || (currentConfig.provider === 'groq' && currentConfig.apiKey)),
+      },
+      {
+        id: 'gemini',
+        name: 'Google Gemini',
+        description: 'Native multimodal AI, fast structured JSON, high Persian fluency',
+        models: [
+          { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
+          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Deep Reasoning)' },
+        ],
+        isConfigured: !!(process.env.GEMINI_API_KEY || (currentConfig.provider === 'gemini' && currentConfig.apiKey)),
       },
       {
         id: 'openai',
@@ -306,8 +306,17 @@ app.post('/api/transcribe-media', async (req, res) => {
     const rawApiKey = (config.apiKey && config.apiKey !== 'abcd') ? config.apiKey : (activeCfg.apiKey !== 'abcd' ? activeCfg.apiKey : '');
     const groqKey = (rawApiKey && rawApiKey.startsWith('gsk_')) ? rawApiKey : process.env.GROQ_API_KEY;
 
-    // If Groq is the provider, or Groq API key is present
-    if ((config.provider === 'groq' || groqKey?.startsWith('gsk_')) && groqKey) {
+    // Check if Groq is target provider (default)
+    const isGroq = config.provider === 'groq' || !config.provider || groqKey?.startsWith('gsk_');
+
+    if (isGroq) {
+      if (!groqKey) {
+        res.status(400).json({
+          error: 'لطفاً کلید Groq API خود را وارد نمایید (با gsk_ شروع می‌شود). رونویسی صوتی مستقیماً و رایگان توسط مدل Whisper (whisper-large-v3) در پردازشگرهای Groq انجام می‌شود.',
+        });
+        return;
+      }
+
       console.log(`[Groq Whisper] Transcribing ${fileName || 'video/audio'} (${(buffer.length / 1024 / 1024).toFixed(2)} MB) with whisper-large-v3...`);
       const whisperResult = await transcribeAudioWithGroqWhisper({
         buffer,
@@ -329,10 +338,15 @@ app.post('/api/transcribe-media', async (req, res) => {
       return;
     }
 
-    // Fallback: Gemini multimodal transcription if Gemini key is available
-    const geminiKey = (rawApiKey && !rawApiKey.startsWith('gsk_') && rawApiKey.length > 15) ? rawApiKey : process.env.GEMINI_API_KEY;
-    if (geminiKey) {
-      console.log(`[Gemini] Transcribing audio with gemini-2.5-flash...`);
+    // Only use Gemini if the user EXPLICITLY selected Gemini
+    if (config.provider === 'gemini') {
+      const geminiKey = (rawApiKey && !rawApiKey.startsWith('gsk_') && rawApiKey.length > 15) ? rawApiKey : process.env.GEMINI_API_KEY;
+      if (!geminiKey) {
+        res.status(400).json({ error: 'لطفاً کلید Gemini API را وارد نمایید.' });
+        return;
+      }
+
+      console.log(`[Gemini] Transcribing audio with gemini-3.6-flash...`);
       const ai = new GoogleGenAI({
         apiKey: geminiKey,
         httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
@@ -340,7 +354,7 @@ app.post('/api/transcribe-media', async (req, res) => {
 
       const prompt = `Transcribe the English speech in this audio/video file. Return a JSON object with key "segments": [ { "start": 0.0, "end": 4.5, "text": "..." } ]`;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: [
           {
             role: 'user',
@@ -363,7 +377,7 @@ app.post('/api/transcribe-media', async (req, res) => {
       res.json({
         success: true,
         provider: 'gemini',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         latencyMs,
         fullText: parsed.map((s: any) => s.text).join(' '),
         segments: parsed,
@@ -372,12 +386,56 @@ app.post('/api/transcribe-media', async (req, res) => {
     }
 
     res.status(400).json({
-      error: 'Please enter your Groq API key (starts with gsk_) or Gemini API key in AI Model settings to transcribe this video.',
+      error: 'لطفاً کلید Groq API خود را وارد نمایید (با gsk_ شروع می‌شود).',
     });
   } catch (err: any) {
     console.error('Media transcription error:', err);
     res.status(500).json({
       error: err.message || 'Failed to transcribe audio file',
+    });
+  }
+});
+
+// POST /api/generate-transcript - Generates speech segments and SRT subtitles matching a video title using the active or requested AI model (e.g. Groq Llama 3.3)
+app.post('/api/generate-transcript', async (req, res) => {
+  try {
+    const { title, duration = 120, aiModelConfig } = req.body;
+    if (!title || !title.trim()) {
+      res.status(400).json({ error: 'Title is required to generate transcript.' });
+      return;
+    }
+
+    const activeCfg = getActiveServerConfig();
+    const config: AIModelConfig = {
+      provider: aiModelConfig?.provider || activeCfg.provider || 'groq',
+      modelName: aiModelConfig?.modelName || activeCfg.modelName || 'llama-3.3-70b-versatile',
+      baseUrl: aiModelConfig?.baseUrl || activeCfg.baseUrl,
+      apiKey: aiModelConfig?.apiKey || activeCfg.apiKey,
+      temperature: aiModelConfig?.temperature ?? activeCfg.temperature,
+    };
+
+    const dummyProj: Partial<Project> = {
+      title,
+      aiModelConfig: config,
+      mediaDuration: Number(duration) || 120,
+    };
+
+    console.log(`[AI Transcript] Generating speech segments for "${title}" using ${config.provider} (${config.modelName})...`);
+    const segments = await generateSegmentsForTitle(title, dummyProj as Project, Number(duration) || 120);
+    const fullText = segments.map((s) => s.text).join(' ');
+
+    res.json({
+      success: true,
+      segments,
+      fullText,
+      count: segments.length,
+      provider: config.provider,
+      modelName: config.modelName,
+    });
+  } catch (err: any) {
+    console.error('Error generating transcript:', err);
+    res.status(500).json({
+      error: err.message || 'Failed to generate transcript',
     });
   }
 });
@@ -390,9 +448,9 @@ app.post('/api/ai/test-connection', async (req, res) => {
   try {
     const rawResult = await runAICompletion({
       config: {
-        provider: provider || 'gemini',
-        modelName: modelName || 'gemini-2.5-flash',
-        baseUrl: baseUrl || 'http://localhost:11434/v1',
+        provider: provider || 'groq',
+        modelName: modelName || (provider === 'groq' ? 'llama-3.3-70b-versatile' : 'llama3.2'),
+        baseUrl: baseUrl || (provider === 'groq' ? 'https://api.groq.com/openai/v1' : 'http://localhost:11434/v1'),
         apiKey,
       },
       systemPrompt: 'You are a test agent. Output a JSON object with { "status": "connected", "message": "Ready to teach" }.',
@@ -402,8 +460,8 @@ app.post('/api/ai/test-connection', async (req, res) => {
     const latencyMs = Date.now() - startTime;
     res.json({
       success: true,
-      provider,
-      modelName,
+      provider: provider || 'groq',
+      modelName: modelName || 'llama-3.3-70b-versatile',
       latencyMs,
       response: rawResult,
     });
@@ -411,8 +469,8 @@ app.post('/api/ai/test-connection', async (req, res) => {
     const latencyMs = Date.now() - startTime;
     res.status(400).json({
       success: false,
-      provider,
-      modelName,
+      provider: provider || 'groq',
+      modelName: modelName || 'llama-3.3-70b-versatile',
       latencyMs,
       error: err.message || 'Connection test failed',
     });
@@ -429,8 +487,8 @@ app.patch('/api/projects/:id/ai-config', (req, res) => {
 
   const { provider, modelName, baseUrl, apiKey, temperature } = req.body;
   project.aiModelConfig = {
-    provider: provider || 'gemini',
-    modelName: modelName || 'gemini-2.5-flash',
+    provider: provider || 'groq',
+    modelName: modelName || 'llama-3.3-70b-versatile',
     baseUrl,
     apiKey,
     temperature,

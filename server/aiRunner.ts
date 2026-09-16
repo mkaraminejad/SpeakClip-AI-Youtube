@@ -8,11 +8,11 @@ export interface AIExecutionOptions {
   geminiSchema?: any;
 }
 
-// In-memory active configuration persisted during server lifecycle
+// In-memory active configuration persisted during server lifecycle (Default: Groq)
 let activeServerConfig: AIModelConfig = {
-  provider: 'gemini',
-  modelName: 'gemini-2.5-flash',
-  apiKey: process.env.GEMINI_API_KEY || '',
+  provider: 'groq',
+  modelName: 'llama-3.3-70b-versatile',
+  apiKey: process.env.GROQ_API_KEY || '',
 };
 
 export function getActiveServerConfig(): AIModelConfig {
@@ -31,17 +31,17 @@ export function getDefaultAIConfig(): AIModelConfig {
   return { ...activeServerConfig };
 }
 
-// Unified runner supporting Gemini, Groq, OpenAI, Claude, and Local LLMs (Ollama / LM Studio / vLLM)
+// Unified runner supporting Groq, Gemini, OpenAI, Claude, and Local LLMs (Ollama / LM Studio / vLLM)
 export async function runAICompletion(options: AIExecutionOptions): Promise<string> {
   const aiConfig = options.config || activeServerConfig || getDefaultAIConfig();
-  const provider = aiConfig.provider || activeServerConfig.provider || 'gemini';
+  const provider = aiConfig.provider || activeServerConfig.provider || 'groq';
   const modelName =
     aiConfig.modelName ||
     activeServerConfig.modelName ||
-    (provider === 'gemini'
-      ? 'gemini-2.5-flash'
-      : provider === 'groq'
+    (provider === 'groq'
       ? 'llama-3.3-70b-versatile'
+      : provider === 'gemini'
+      ? 'gemini-3.6-flash'
       : 'llama3.2');
 
   // 1. Google Gemini Provider
